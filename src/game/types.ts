@@ -1,5 +1,5 @@
 export type TileType =
-  | 'grass' | 'road' | 'water'
+  | 'grass' | 'road' | 'water' | 'river' | 'bridge' | 'tramrail' | 'rail'
   | 'residential' | 'commercial' | 'industrial'
   | 'park' | 'policestation' | 'hospital' | 'firestation' | 'school'
   | 'stadium' | 'casino' | 'bank' | 'powerplant'
@@ -100,6 +100,8 @@ export interface Vehicle {
   lastDecisionBlock?: { x: number; y: number };
   route?: { x: number; y: number }[];
   routeRetryTick?: number;
+  routeKind?: 'road' | 'tram' | 'rail';
+  stopTimer?: number;
 }
 
 export interface Pedestrian {
@@ -126,6 +128,7 @@ export interface Pedestrian {
   decisionTick: number;
   path?: { x: number; y: number }[];
   pathRetryTick?: number;
+  intent?: 'home' | 'work' | 'social' | 'respond' | 'patrol' | 'territory';
 }
 
 export interface Bullet {

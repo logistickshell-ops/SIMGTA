@@ -71,6 +71,9 @@ export class Game {
   private lastCityTick = 0;
   private roadGraph = new Map<string, { x: number; y: number; neighbors: { x: number; y: number; cost: number }[] }>();
   private roadGraphDirty = true;
+  private tramGraph = new Map<string, { x: number; y: number; neighbors: { x: number; y: number; cost: number }[] }>();
+  private railGraph = new Map<string, { x: number; y: number; neighbors: { x: number; y: number; cost: number }[] }>();
+  private transitGraphDirty = true;
   private routePlanBudget = 0;
   private lastSaveTick = 0;
   private readonly saveKey = 'urban-flux-city-v2';
@@ -151,6 +154,7 @@ export class Game {
       this.totalKills = saved.totalKills ?? 0;
       this.totalEarned = saved.totalEarned ?? 0;
       this.roadGraphDirty = true;
+      this.transitGraphDirty = true;
       this.rebuildSpatialGrid();
       return true;
     } catch {
@@ -230,13 +234,15 @@ export class Game {
     const id = uid();
     if (charge) this.stats.money -= def.cost;
     this.buildings.push({ id, type, x, y, size: def.size });
-    if (type === 'road') this.roadGraphDirty = true;
+    if (['road', 'bridge', 'tramrail', 'rail', 'river'].includes(type)) { this.roadGraphDirty = true; this.transitGraphDirty = true; }
     for (let oy = 0; oy < def.size; oy++) for (let ox = 0; ox < def.size; ox++) this.tiles[y + oy][x + ox] = this.makeTile(type, id);
     if (charge) {
       this.emitParticles((x + def.size / 2) * TILE_SIZE, (y + def.size / 2) * TILE_SIZE, '#31d7c8', 8);
       this.addMessage(`${def.name}: подключено`, '#69d9c8');
     }
     this.refreshAssignments();
+    if (type === 'tramdepot') this.spawnTransitVehicle('tram', x, y);
+    if (type === 'trainstation') this.spawnTransitVehicle('train', x, y);
     return true;
   }
 
@@ -247,7 +253,11 @@ export class Game {
     if (def.size === 2 && (x % 2 !== 0 || y % 2 !== 0)) return false;
     for (let oy = 0; oy < def.size; oy++) for (let ox = 0; ox < def.size; ox++) {
       const t = this.tiles[y + oy][x + ox];
-      if (t.type !== 'grass' && !(type === 'road' && t.type === 'road')) return false;
+      const allowed = type === 'river' ? t.type === 'grass'
+        : type === 'bridge' ? (t.type === 'river' || t.type === 'water')
+        : type === 'tramrail' || type === 'rail' ? (t.type === 'grass' || t.type === 'road' || t.type === type)
+        : t.type === 'grass' || (type === 'road' && t.type === 'road');
+      if (!allowed) return false;
     }
     return true;
   }
@@ -450,10 +460,18 @@ export class Game {
     if (destination) {
       ped.targetX = (destination.x + destination.size / 2) * TILE_SIZE;
       ped.targetY = (destination.y + destination.size / 2) * TILE_SIZE;
+      ped.intent = socialHours && destination === social ? 'social' : workingHours && destination === work ? 'work' : destination === home ? 'home' : 'work';
       ped.state = socialHours && destination === social ? 'socializing' : workingHours && destination === work ? 'working' : 'walking';
     } else {
-      const roam = this.getRandomRoadPosition();
-      ped.targetX = roam.x; ped.targetY = roam.y; ped.state = 'walking';
+      const fallback = this.getNearestBuilding(ped.x, ped.y, ['park', 'commercial', 'residential']);
+      if (fallback) {
+        ped.targetX = (fallback.x + fallback.size / 2) * TILE_SIZE;
+        ped.targetY = (fallback.y + fallback.size / 2) * TILE_SIZE;
+        ped.intent = fallback.type === 'park' || fallback.type === 'commercial' ? 'social' : 'home';
+        ped.state = 'walking';
+      } else {
+        ped.targetX = ped.x; ped.targetY = ped.y; ped.intent = 'home'; ped.state = 'walking';
+      }
     }
   }
 
@@ -492,7 +510,7 @@ export class Game {
   private setNpcToWork(ped: Pedestrian) {
     const work = this.getBuildingById(ped.workBuildingId) ?? this.findWorkplace(ped.profession);
     if (!work) { ped.state = 'walking'; return; }
-    ped.targetX = (work.x + work.size / 2) * TILE_SIZE; ped.targetY = (work.y + work.size / 2) * TILE_SIZE; ped.state = 'working';
+    ped.targetX = (work.x + work.size / 2) * TILE_SIZE; ped.targetY = (work.y + work.size / 2) * TILE_SIZE; ped.intent = 'work'; ped.state = 'working';
   }
 
   private movePedestrian(ped: Pedestrian, factor: number) {
@@ -552,6 +570,49 @@ export class Game {
     this.roadGraphDirty = false;
   }
 
+  private ensureTransitGraph() {
+    if (!this.transitGraphDirty) return;
+    this.tramGraph.clear(); this.railGraph.clear();
+    const build = (target: Map<string, { x: number; y: number; neighbors: { x: number; y: number; cost: number }[] }>, type: 'tramrail' | 'rail') => {
+      for (let y = 0; y < MAP_HEIGHT; y++) for (let x = 0; x < MAP_WIDTH; x++) {
+        if (this.tiles[y][x].type !== type) continue;
+        const neighbors = [{ x: x + 1, y }, { x: x - 1, y }, { x, y: y + 1 }, { x, y: y - 1 }]
+          .filter(point => point.x >= 0 && point.y >= 0 && point.x < MAP_WIDTH && point.y < MAP_HEIGHT && this.tiles[point.y][point.x].type === type)
+          .map(point => ({ ...point, cost: 1 }));
+        target.set(this.roadKey(x, y), { x, y, neighbors });
+      }
+    };
+    build(this.tramGraph, 'tramrail'); build(this.railGraph, 'rail'); this.transitGraphDirty = false;
+  }
+
+  private findTransitPath(startWorldX: number, startWorldY: number, endWorldX: number, endWorldY: number, kind: 'tram' | 'train') {
+    this.ensureTransitGraph();
+    const graph = kind === 'tram' ? this.tramGraph : this.railGraph;
+    const type = kind === 'tram' ? 'tramrail' : 'rail';
+    const nearest = (worldX: number, worldY: number) => {
+      const sx = Math.floor(worldX / TILE_SIZE), sy = Math.floor(worldY / TILE_SIZE); let best: { x: number; y: number; d: number } | undefined;
+      for (const node of graph.values()) { const d = Math.hypot(node.x - sx, node.y - sy); if (!best || d < best.d) best = { x: node.x, y: node.y, d }; }
+      return best ? { x: best.x, y: best.y } : null;
+    };
+    const start = nearest(startWorldX, startWorldY), goal = nearest(endWorldX, endWorldY);
+    if (!start || !goal) return [];
+    const startKey = this.roadKey(start.x, start.y), goalKey = this.roadKey(goal.x, goal.y);
+    const open = [startKey], cameFrom = new Map<string, string>(), score = new Map<string, number>([[startKey, 0]]), estimate = new Map<string, number>([[startKey, Math.hypot(goal.x - start.x, goal.y - start.y)]]);
+    while (open.length) {
+      open.sort((a, b) => (estimate.get(a) ?? Infinity) - (estimate.get(b) ?? Infinity)); const current = open.shift()!;
+      if (current === goalKey) { const keys = [current]; while (cameFrom.has(keys[0])) keys.unshift(cameFrom.get(keys[0])!); return keys.slice(1).map(key => { const [x, y] = key.split(':').map(Number); return { x: x * TILE_SIZE + TILE_SIZE / 2, y: y * TILE_SIZE + TILE_SIZE / 2 }; }); }
+      const node = graph.get(current); if (!node) continue;
+      for (const neighbor of node.neighbors) { const key = this.roadKey(neighbor.x, neighbor.y), next = (score.get(current) ?? Infinity) + neighbor.cost; if (next < (score.get(key) ?? Infinity)) { cameFrom.set(key, current); score.set(key, next); estimate.set(key, next + Math.hypot(goal.x - neighbor.x, goal.y - neighbor.y)); if (!open.includes(key)) open.push(key); } }
+    }
+    return [];
+  }
+
+  private nearestTransitPosition(worldX: number, worldY: number, kind: 'tram' | 'train') {
+    this.ensureTransitGraph(); const graph = kind === 'tram' ? this.tramGraph : this.railGraph; let best: { x: number; y: number; d: number } | undefined;
+    for (const node of graph.values()) { const d = Math.hypot(node.x * TILE_SIZE - worldX, node.y * TILE_SIZE - worldY); if (!best || d < best.d) best = { x: node.x, y: node.y, d }; }
+    return best ? { x: best.x * TILE_SIZE + TILE_SIZE / 2, y: best.y * TILE_SIZE + TILE_SIZE / 2, angle: 0 } : null;
+  }
+
   private nearestRoadTile(worldX: number, worldY: number) {
     const sx = Math.floor(worldX / TILE_SIZE), sy = Math.floor(worldY / TILE_SIZE);
     let best: { x: number; y: number; distance: number } | null = null;
@@ -598,22 +659,48 @@ export class Game {
     return this.findRoadPath(worldX, worldY, target.x, target.y);
   }
 
+  private nextVehicleDestination(vehicle: Vehicle) {
+    const candidates = vehicle.type === 'gang'
+      ? this.buildings.filter(building => ['commercial', 'industrial', 'casino'].includes(building.type))
+      : this.buildings.filter(building => ['residential', 'commercial', 'industrial', 'park', 'busdepot', 'tramdepot', 'trainstation'].includes(building.type));
+    const target = candidates.length ? candidates[(vehicle.id + this.tickCount) % candidates.length] : undefined;
+    if (!target) return this.nextRoadDestination(vehicle.x, vehicle.y);
+    vehicle.targetX = (target.x + target.size / 2) * TILE_SIZE;
+    vehicle.targetY = (target.y + target.size / 2) * TILE_SIZE;
+    return this.findRoadPath(vehicle.x, vehicle.y, vehicle.targetX, vehicle.targetY);
+  }
+
   private updateVehicles(dt: number) {
     const frameScale = Math.min(3, Math.max(0.5, dt / 16.67));
     for (const vehicle of this.vehicles) {
       if (vehicle.id === this.playerInVehicleId || vehicle.type === 'airplane') continue;
+      if (vehicle.type === 'tram' || vehicle.type === 'train') {
+        const kind = vehicle.type === 'tram' ? 'tram' : 'train';
+        if (!this.isTransitPosition(vehicle.x, vehicle.y, kind)) { const rail = this.nearestTransitPosition(vehicle.x, vehicle.y, kind); if (!rail) { vehicle.speed = 0; continue; } vehicle.x = rail.x; vehicle.y = rail.y; vehicle.angle = rail.angle; }
+        if (vehicle.stopTimer && vehicle.stopTimer > 0) { vehicle.stopTimer -= frameScale; vehicle.speed = 0; continue; }
+        if (!vehicle.route?.length && this.routePlanBudget > 0) { this.routePlanBudget--; const target = this.buildings.find(building => building.type === (kind === 'tram' ? 'tramdepot' : 'trainstation')); if (target) vehicle.route = this.findTransitPath(vehicle.x, vehicle.y, (target.x + target.size / 2) * TILE_SIZE, (target.y + target.size / 2) * TILE_SIZE, kind); }
+        const transitWaypoint = vehicle.route?.[0]; if (!transitWaypoint) { vehicle.stopTimer = 40; vehicle.speed = 0; continue; }
+        const distance = Math.hypot(transitWaypoint.x - vehicle.x, transitWaypoint.y - vehicle.y);
+        if (distance < 10) { vehicle.route?.shift(); vehicle.stopTimer = vehicle.route?.length ? 0 : 40; continue; }
+        vehicle.angle = Math.atan2(transitWaypoint.y - vehicle.y, transitWaypoint.x - vehicle.x);
+        const transitSpeed = kind === 'tram' ? 0.9 : 1.2; vehicle.vx = Math.cos(vehicle.angle) * transitSpeed; vehicle.vy = Math.sin(vehicle.angle) * transitSpeed;
+        const nx = vehicle.x + vehicle.vx * frameScale, ny = vehicle.y + vehicle.vy * frameScale; if (this.isTransitPosition(nx, ny, kind)) { vehicle.x = nx; vehicle.y = ny; } vehicle.speed = transitSpeed; continue;
+      }
       if (!this.isRoadPosition(vehicle.x, vehicle.y)) { const road = this.findNearestRoadPosition(vehicle.x, vehicle.y); vehicle.x = road.x; vehicle.y = road.y; vehicle.angle = road.angle; }
+      if (vehicle.stopTimer && vehicle.stopTimer > 0) { vehicle.stopTimer -= frameScale; vehicle.speed = 0; continue; }
       if (!vehicle.route?.length && this.tickCount >= (vehicle.routeRetryTick ?? 0) && this.routePlanBudget > 0) {
         this.routePlanBudget--;
-        vehicle.route = this.nextRoadDestination(vehicle.x, vehicle.y);
+        vehicle.route = this.nextVehicleDestination(vehicle);
         vehicle.routeRetryTick = this.tickCount + 18;
       }
       const waypoint = vehicle.route?.[0];
       let atJunction = false;
       if (waypoint) {
         const distance = Math.hypot(waypoint.x - vehicle.x, waypoint.y - vehicle.y);
-        if (distance < 10) vehicle.route?.shift();
-        else {
+        if (distance < 10) {
+          vehicle.route?.shift();
+          if (!vehicle.route?.length) vehicle.stopTimer = vehicle.type === 'taxi' || vehicle.type === 'bus' ? 34 : 18;
+        } else {
           const desired = Math.atan2(waypoint.y - vehicle.y, waypoint.x - vehicle.x);
           const laneSide = vehicle.id % 2 === 0 ? 2.4 : -2.4;
           const targetX = waypoint.x + Math.sin(desired) * laneSide, targetY = waypoint.y - Math.cos(desired) * laneSide;
@@ -625,7 +712,7 @@ export class Game {
         }
       }
       const blocked = this.hasVehicleAhead(vehicle);
-      const cruise = vehicle.type === 'sport' ? 1.5 : vehicle.type === 'gang' ? 1.3 : 1.05;
+      const cruise = vehicle.type === 'sport' ? 1.5 : vehicle.type === 'gang' ? 1.3 : vehicle.type === 'taxi' ? 1.1 : 1.05;
       const speed = blocked ? 0 : atJunction ? cruise * 0.48 : cruise;
       vehicle.vx = Math.cos(vehicle.angle) * speed; vehicle.vy = Math.sin(vehicle.angle) * speed;
       const nx = vehicle.x + vehicle.vx * frameScale, ny = vehicle.y + vehicle.vy * frameScale;
@@ -793,13 +880,23 @@ export class Game {
     this.vehicles.push({ id: uid(), x: pos.x, y: pos.y, vx: 0, vy: 0, angle: pos.angle, speed: 0, health: 100, type, gang: 'none', driver: 'civilian', passengers: 0 });
   }
 
+  private spawnTransitVehicle(type: 'tram' | 'train', x: number, y: number) {
+    const pos = this.nearestTransitPosition((x + 1) * TILE_SIZE, (y + 1) * TILE_SIZE, type);
+    if (!pos) { this.addMessage(`${type === 'tram' ? 'Трамвай' : 'Поезд'} ждёт рельсов`, '#f4cf68'); return; }
+    this.vehicles.push({ id: uid(), x: pos.x, y: pos.y, vx: 0, vy: 0, angle: pos.angle, speed: 0, health: 180, type, gang: 'none', driver: 'transit', passengers: 0, routeKind: type === 'train' ? 'rail' : 'tram', stopTimer: 18 });
+    this.addMessage(`${type === 'tram' ? 'Трамвай' : 'Поезд'} вышел на линию`, '#69d9c8');
+  }
+
   private spawnGangVehicle(gang: Exclude<GangId, 'none'>) {
     const pos = this.getRandomRoadPosition();
     this.vehicles.push({ id: uid(), x: pos.x, y: pos.y, vx: 0, vy: 0, angle: pos.angle, speed: 0, health: 120, type: 'gang', gang, driver: 'gang', passengers: 2 });
   }
 
   spawnPedestrian(type: Pedestrian['type'], x?: number, y?: number, gang: GangId = 'none') {
-    const pos = x === undefined || y === undefined ? this.getRandomRoadPosition() : { x, y, angle: Math.random() * Math.PI * 2 };
+    const civilianHome = type === 'civilian' ? this.buildings.filter(building => ['residential', 'commercial', 'park'].includes(building.type))[this.pedestrians.length % Math.max(1, this.buildings.filter(building => ['residential', 'commercial', 'park'].includes(building.type)).length)] : undefined;
+    const pos = x === undefined || y === undefined
+      ? civilianHome ? { x: (civilianHome.x + civilianHome.size / 2) * TILE_SIZE, y: (civilianHome.y + civilianHome.size / 2) * TILE_SIZE, angle: Math.random() * Math.PI * 2 } : this.getRandomRoadPosition()
+      : { x, y, angle: Math.random() * Math.PI * 2 };
     const roleProfession: Record<Pedestrian['type'], Profession> = { civilian: 'resident', officer: 'officer', enforcer: 'gang', firefighter: 'firefighter', medic: 'medic' };
     const ped: Pedestrian = { id: uid(), x: pos.x, y: pos.y, vx: 0, vy: 0, angle: pos.angle, speed: 0.7, type, profession: roleProfession[type], gang, health: type === 'enforcer' ? 65 : type === 'officer' ? 85 : 45, state: 'walking', weaponCooldown: 0, socialMeter: 38 + Math.random() * 30, mood: 48 + Math.random() * 22, decisionTick: 0 };
     this.pedestrians.push(ped); return ped;
@@ -824,15 +921,23 @@ export class Game {
     return this.getRandomRoadPosition();
   }
 
-  isRoadTile(x: number, y: number) { return x >= 0 && y >= 0 && x < MAP_WIDTH && y < MAP_HEIGHT && this.tiles[y][x].type === 'road'; }
+  isRoadTile(x: number, y: number) {
+    if (x < 0 || y < 0 || x >= MAP_WIDTH || y >= MAP_HEIGHT) return false;
+    const type = this.tiles[y][x].type;
+    return type === 'road' || type === 'bridge';
+  }
   isRoadPosition(x: number, y: number) { return this.isRoadTile(Math.floor(x / TILE_SIZE), Math.floor(y / TILE_SIZE)); }
+  private isTransitPosition(x: number, y: number, kind: 'tram' | 'train') {
+    const tx = Math.floor(x / TILE_SIZE), ty = Math.floor(y / TILE_SIZE), type = kind === 'tram' ? 'tramrail' : 'rail';
+    return tx >= 0 && ty >= 0 && tx < MAP_WIDTH && ty < MAP_HEIGHT && this.tiles[ty][tx].type === type;
+  }
   private isBlocked(x: number, y: number, _margin = 4) {
     if (!Number.isFinite(x) || !Number.isFinite(y)) return true;
     const tx = Math.floor(x / TILE_SIZE), ty = Math.floor(y / TILE_SIZE);
     if (tx < 0 || ty < 0 || tx >= MAP_WIDTH || ty >= MAP_HEIGHT) return true;
     const tile = this.tiles[ty]?.[tx];
     if (!tile) return true;
-    return tile.type !== 'grass' && tile.type !== 'road' && tile.type !== 'park';
+    return tile.type !== 'grass' && tile.type !== 'road' && tile.type !== 'bridge' && tile.type !== 'park';
   }
 
   private updateCamera(input: Input) {

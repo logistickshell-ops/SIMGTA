@@ -88,4 +88,20 @@ describe('Urban Flux city systems', () => {
     expect(atThree.x).toBeCloseTo(before.x, 8);
     expect(atThree.y).toBeCloseTo(before.y, 8);
   });
+
+  it('supports river cells, bridges over a river, and separate rail construction', () => {
+    const game = new Game();
+    game.tool = 'river';
+    for (const [x, y] of [[60, 20], [61, 20], [60, 21], [61, 21]] as const) game.placeTool(x, y);
+    expect(game.tiles[20][60]?.type).toBe('river');
+    game.tool = 'bridge';
+    game.placeTool(60, 20);
+    expect(game.tiles[20][60]?.type).toBe('bridge');
+    game.tool = 'tramrail';
+    game.placeTool(50, 20);
+    game.tool = 'rail';
+    game.placeTool(50, 22);
+    expect(game.tiles[20][50]?.type).toBe('tramrail');
+    expect(game.tiles[22][50]?.type).toBe('rail');
+  });
 });

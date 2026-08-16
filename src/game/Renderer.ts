@@ -66,9 +66,20 @@ export class Renderer {
   private drawGround(tile: Tile, x: number, y: number, night: boolean) {
     const { ctx } = this;
     const px = x * TILE_SIZE, py = y * TILE_SIZE;
-    if (tile.type === 'water') {
-      ctx.fillStyle = COLORS.water; ctx.fillRect(px, py, TILE_SIZE, TILE_SIZE);
-      ctx.strokeStyle = 'rgba(124,204,225,.18)'; ctx.beginPath(); ctx.moveTo(px + 3, py + 8); ctx.lineTo(px + 12, py + 8); ctx.stroke(); return;
+    if (tile.type === 'water' || tile.type === 'river') {
+      ctx.fillStyle = tile.type === 'river' ? COLORS.river : COLORS.water; ctx.fillRect(px, py, TILE_SIZE, TILE_SIZE);
+      ctx.strokeStyle = tile.type === 'river' ? 'rgba(155,226,235,.38)' : 'rgba(124,204,225,.18)';
+      ctx.beginPath(); ctx.moveTo(px + 2, py + 6 + (tile.variant % 3)); ctx.quadraticCurveTo(px + 8, py + 2, px + 14, py + 7); ctx.stroke(); return;
+    }
+    if (tile.type === 'bridge') {
+      ctx.fillStyle = COLORS.bridge; ctx.fillRect(px, py, TILE_SIZE, TILE_SIZE);
+      ctx.strokeStyle = 'rgba(35,24,17,.65)'; ctx.lineWidth = 1; ctx.strokeRect(px + 2, py + 2, TILE_SIZE - 4, TILE_SIZE - 4); return;
+    }
+    if (tile.type === 'tramrail' || tile.type === 'rail') {
+      ctx.fillStyle = tile.type === 'tramrail' ? '#31434b' : '#28323b'; ctx.fillRect(px, py, TILE_SIZE, TILE_SIZE);
+      ctx.strokeStyle = tile.type === 'tramrail' ? COLORS.tramrail : COLORS.rail; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(px + 3, py + 3); ctx.lineTo(px + 3, py + 13); ctx.moveTo(px + 13, py + 3); ctx.lineTo(px + 13, py + 13); ctx.stroke();
+      if ((x + y) % 2 === 0) { ctx.strokeStyle = 'rgba(230,220,190,.4)'; ctx.beginPath(); ctx.moveTo(px + 2, py + 8); ctx.lineTo(px + 14, py + 8); ctx.stroke(); } return;
     }
     if (tile.type === 'road') {
       ctx.fillStyle = COLORS.road; ctx.fillRect(px, py, TILE_SIZE, TILE_SIZE);

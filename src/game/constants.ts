@@ -6,7 +6,7 @@ export const MAP_HEIGHT = 120;
 export const DAY_LENGTH_MS = 60_000;
 
 export const COLORS = {
-  grass: '#284936', grassAlt: '#31563e', road: '#202936', roadLine: '#eab85b', sidewalk: '#3d4754', water: '#173d58',
+  grass: '#284936', grassAlt: '#31563e', road: '#202936', roadLine: '#eab85b', sidewalk: '#3d4754', water: '#173d58', river: '#1f5e78', bridge: '#b8874b', tramrail: '#b6c5c8', rail: '#8e9aa4',
   residential: '#6a9e75', commercial: '#398daf', industrial: '#b4794f', park: '#4ea36b',
   police: '#4f8cc9', hospital: '#d7e7ee', fire: '#dc5d4f', school: '#d4ad55', power: '#8a919b',
   stadium: '#60a97a', casino: '#df6471', bank: '#c7a465', bus: '#d7ac4c', tram: '#d26362', train: '#6b96b5', airport: '#3e6c86', gunshop: '#a26e9b',
@@ -27,6 +27,10 @@ export const BUILDINGS: Record<TileType, BuildingDef> = {
   grass: { type: 'grass', name: 'Свободный участок', icon: '◇', cost: 0, upkeep: 0, income: 0, population: 0, workSlots: 0, socialValue: 0, desc: 'Свободная земля', color: COLORS.grass, size: 1, category: 'zone' },
   road: { type: 'road', name: 'Магистраль', icon: '╋', cost: 80, upkeep: 2, income: 0, population: 0, workSlots: 0, socialValue: 0, desc: 'Двухполосная городская дорога', color: COLORS.road, size: 2, category: 'zone' },
   water: { type: 'water', name: 'Вода', icon: '≈', cost: 0, upkeep: 0, income: 0, population: 0, workSlots: 0, socialValue: 0, desc: 'Непроходимая зона', color: COLORS.water, size: 1, category: 'zone' },
+  river: { type: 'river', name: 'Река', icon: '≋', cost: 40, upkeep: 0, income: 0, population: 0, workSlots: 0, socialValue: 2, desc: 'Водный коридор, который требует мостов для пересечения', color: COLORS.river, size: 1, category: 'zone' },
+  bridge: { type: 'bridge', name: 'Мост', icon: '▤', cost: 260, upkeep: 5, income: 0, population: 0, workSlots: 0, socialValue: 3, desc: 'Пересекает реку и соединяет дорожный граф', color: COLORS.bridge, size: 2, category: 'transport' },
+  tramrail: { type: 'tramrail', name: 'Трамвайные рельсы', icon: '═', cost: 95, upkeep: 3, income: 0, population: 0, workSlots: 0, socialValue: 1, desc: 'Полотно для городского трамвая', color: COLORS.tramrail, size: 1, category: 'transport' },
+  rail: { type: 'rail', name: 'Железная дорога', icon: '▥', cost: 125, upkeep: 4, income: 0, population: 0, workSlots: 0, socialValue: 1, desc: 'Магистраль для поездов', color: COLORS.rail, size: 1, category: 'transport' },
   residential: { type: 'residential', name: 'Жилой квартал', icon: '⌂', cost: 100, upkeep: 2, income: 30, population: 100, workSlots: 0, socialValue: 1, desc: 'Дом, связи и городской спрос', color: COLORS.residential, size: 1, category: 'zone' },
   commercial: { type: 'commercial', name: 'Торговый блок', icon: '▣', cost: 120, upkeep: 3, income: 50, population: 0, workSlots: 6, socialValue: 2, desc: 'Работа, покупки и социальные встречи', color: COLORS.commercial, size: 1, category: 'zone' },
   industrial: { type: 'industrial', name: 'Промышленный блок', icon: '▥', cost: 150, upkeep: 4, income: 80, population: 0, workSlots: 10, socialValue: -1, desc: 'Работа и стабильный доход', color: COLORS.industrial, size: 1, category: 'zone' },
