@@ -552,7 +552,7 @@ export class Renderer {
     else if (v.type === 'bus') color = COLORS.bus;
     else if (v.type === 'tram') color = COLORS.tram;
     else if (v.type === 'train') color = COLORS.train;
-    else if (v.type === 'gang') color = v.gang !== 'none' ? GANG_COLORS[v.gang] : '#888888';
+    else if (v.type === 'gang' || v.gang !== 'none') color = v.gang !== 'none' ? GANG_COLORS[v.gang] : '#888888';
     else color = '#888899';
     // body
     ctx.fillStyle = color;
@@ -599,6 +599,7 @@ export class Renderer {
     else if (p.type === 'gang1') color = COLORS.gang1;
     else if (p.type === 'gang2') color = COLORS.gang2;
     else if (p.type === 'gang3') color = COLORS.gang3;
+    else if (p.type === 'gang4') color = COLORS.gang4;
     // body
     ctx.fillStyle = color;
     ctx.fillRect(-2, -2, 4, 4);
@@ -788,8 +789,9 @@ export class Renderer {
       if (ped.type === 'police') ctx.fillStyle = '#ffffff';
       else if (ped.type === 'gang1') ctx.fillStyle = COLORS.gang1;
       else if (ped.type === 'gang2') ctx.fillStyle = COLORS.gang2;
-      else if (ped.type === 'gang3') ctx.fillStyle = COLORS.gang3;
-      else ctx.fillStyle = '#b8b8b8';
+       else if (ped.type === 'gang3') ctx.fillStyle = COLORS.gang3;
+       else if (ped.type === 'gang4') ctx.fillStyle = COLORS.gang4;
+       else ctx.fillStyle = '#b8b8b8';
       ctx.fillRect(rx - 1.5, ry - 1.5, 3, 3);
     }
     for (const pickup of g.pickups) {

@@ -70,7 +70,10 @@ export class Game {
   policePatrolTimer = 0;
   publicTransportTimer = 0;
   gangWarTimer = 0;
-  bossSpawned: Record<GangId, boolean> = { loons: false, yutes: false, russians: false, none: false };
+  bossSpawned: Record<GangId, boolean> = { loons: false, yutes: false, russians: false, triads: false, none: false };
+  /** Городской автопилот действует только на NPC и городской транспорт, игрока не трогает. */
+  cityAutopilot = true;
+  cityDecisionTimer = 0;
   bossIds: number[] = [];
   superWeapon = false;
   superWeaponTimer = 0;
@@ -147,6 +150,11 @@ export class Game {
   spawnStartingEntities() {
     for (let i = 0; i < 8; i++) this.spawnRandomVehicle();
     for (let i = 0; i < 20; i++) this.spawnPedestrian('civilian');
+    // В начале сразу видны все четыре клана, а не только после случайного crime-спавна.
+    for (const gang of ['loons', 'yutes', 'russians', 'triads'] as GangId[]) {
+      for (let i = 0; i < 2; i++) this.spawnGangMember(gang);
+      this.spawnGangVehicle(gang);
+    }
   }
 
   spawnRandomVehicle() {
@@ -156,6 +164,15 @@ export class Game {
     this.vehicles.push({
       id: uid(), x: pos.x, y: pos.y, vx: 0, vy: 0, angle: pos.angle ?? 0,
       speed: 0, health: 100, type, gang: 'none', driver: 'civilian', passengers: 0,
+    });
+  }
+
+  spawnGangVehicle(gang: GangId) {
+    const pos = this.getRandomRoadPosition();
+    this.vehicles.push({
+      id: uid(), x: pos.x, y: pos.y, vx: 0, vy: 0, angle: pos.angle ?? 0,
+      speed: 0, health: 120, type: Math.random() < 0.25 ? 'sport' : 'gang',
+      gang, driver: 'gang', passengers: 2,
     });
   }
 
@@ -180,7 +197,7 @@ export class Game {
       if (this.tiles[ty][tx].gang === gang) { sx = tx; sy = ty; found = 1; }
     }
     if (!found) { sx = 5 + Math.floor(Math.random() * (MAP_WIDTH - 10)); sy = 5 + Math.floor(Math.random() * (MAP_HEIGHT - 10)); }
-    const type: Pedestrian['type'] = gang === 'loons' ? 'gang1' : gang === 'yutes' ? 'gang2' : 'gang3';
+    const type: Pedestrian['type'] = gang === 'loons' ? 'gang1' : gang === 'yutes' ? 'gang2' : gang === 'russians' ? 'gang3' : 'gang4';
     this.spawnPedestrian(type, sx * TILE_SIZE, sy * TILE_SIZE, gang);
   }
 
@@ -490,6 +507,7 @@ export class Game {
     else this.updateStrategy(input);
     this.updateVehicles(dt);
     this.updatePedestrians(dt);
+    if (this.cityAutopilot) this.updateCityAutopilot(dt);
     this.updateBullets();
     this.updateExplosions();
     this.updatePickups();
@@ -807,6 +825,25 @@ export class Game {
   // ----------------------------------------------------------------
   //   ПЕШЕХОДЫ И МАШИНЫ
   // ----------------------------------------------------------------
+  updateCityAutopilot(dt: number) {
+    // Решения принимаются редко: движение и бой остаются плавными, а тяжёлые поиски не идут каждый кадр.
+    this.cityDecisionTimer += dt;
+    if (this.cityDecisionTimer < 900) return;
+    this.cityDecisionTimer = 0;
+    const liveGangCounts = new Map<GangId, number>();
+    for (const p of this.pedestrians) {
+      if (p.state !== 'dead' && p.gang !== 'none') liveGangCounts.set(p.gang, (liveGangCounts.get(p.gang) ?? 0) + 1);
+    }
+    for (const gang of ['loons', 'yutes', 'russians', 'triads'] as GangId[]) {
+      if ((liveGangCounts.get(gang) ?? 0) < 2 && Math.random() < 0.65) this.spawnGangMember(gang);
+    }
+    // Автопилот поддерживает дороги и фракционный транспорт, но никогда не меняет player/playerInVehicleId.
+    const gangVehicles = this.vehicles.filter(v => v.driver === 'gang' && v.health > 0);
+    for (const gang of ['loons', 'yutes', 'russians', 'triads'] as GangId[]) {
+      if (!gangVehicles.some(v => v.gang === gang) && Math.random() < 0.5) this.spawnGangVehicle(gang);
+    }
+  }
+
   updateVehicles(_dt: number) {
     for (const v of this.vehicles) {
       if (v.id === this.playerInVehicleId) continue;
@@ -1064,7 +1101,7 @@ export class Game {
               if (target) target.health = Math.min(target.health + 30, 80);
             }
           } else p.speed = 0.7;
-        } else if (p.type === 'gang1' || p.type === 'gang2' || p.type === 'gang3') {
+        } else if (p.type === 'gang1' || p.type === 'gang2' || p.type === 'gang3' || p.type === 'gang4') {
           let nearestEnemy: { x: number, y: number, d: number, isPlayer: boolean } | null = null;
           if (this.player.wanted > 0 || this.playerInVehicleId !== null) {
             const d = Math.hypot(this.player.x - p.x, this.player.y - p.y);
@@ -1079,7 +1116,7 @@ export class Game {
             p.angle = Math.atan2(nearestEnemy.y - p.y, nearestEnemy.x - p.x);
             p.speed = 1.4;
             if (nearestEnemy.d < 250 && p.weaponCooldown === 0) {
-              this.bullets.push({ id: uid(), x: p.x, y: p.y, vx: Math.cos(p.angle) * 6, vy: Math.sin(p.angle) * 6, damage: 15, owner: nearestEnemy.isPlayer ? (p.type === 'gang1' ? 'gang1' : p.type === 'gang2' ? 'gang2' : 'gang3') : 'gang1', life: 50 });
+              this.bullets.push({ id: uid(), x: p.x, y: p.y, vx: Math.cos(p.angle) * 6, vy: Math.sin(p.angle) * 6, damage: 15, owner: nearestEnemy.isPlayer ? (p.type === 'gang1' ? 'gang1' : p.type === 'gang2' ? 'gang2' : p.type === 'gang3' ? 'gang3' : 'gang4') : (p.gang === 'triads' ? 'gang4' : p.gang === 'russians' ? 'gang3' : p.gang === 'yutes' ? 'gang2' : 'gang1'), life: 50 });
               p.weaponCooldown = 40;
             }
           } else p.speed = 0.5;
@@ -1182,7 +1219,7 @@ export class Game {
         if (t.type === 'residential' || t.type === 'commercial' || t.type === 'industrial') {
           if (this.tickCount % 300 === 0) {
             const rand = Math.random();
-            if (rand < 0.05) { if (rand < 0.017) t.gang = 'loons'; else if (rand < 0.034) t.gang = 'yutes'; else t.gang = 'russians'; }
+            if (rand < 0.05) { if (rand < 0.0125) t.gang = 'loons'; else if (rand < 0.025) t.gang = 'yutes'; else if (rand < 0.0375) t.gang = 'russians'; else t.gang = 'triads'; }
             else if (rand > 0.95) t.gang = 'none';
           }
         }
@@ -1278,7 +1315,7 @@ export class Game {
           const nx = x + dx, ny = y + dy;
           if (nx >= 0 && ny >= 0 && nx < MAP_WIDTH && ny < MAP_HEIGHT && this.tiles[ny][nx].type === 'policestation') nearPolice = true;
         }
-        if (!nearPolice && Math.random() < 0.3) { t.hasCrime = true; this.spawnGangMember(['loons', 'yutes', 'russians'][Math.floor(Math.random() * 3)] as GangId); break; }
+        if (!nearPolice && Math.random() < 0.3) { t.hasCrime = true; this.spawnGangMember(['loons', 'yutes', 'russians', 'triads'][Math.floor(Math.random() * 4)] as GangId); break; }
       }
     }
   }
@@ -1372,9 +1409,9 @@ export class Game {
     if (this.tickCount - this.gangWarTimer < 1000) return;
     this.gangWarTimer = this.tickCount;
     if (Math.random() < 0.3) {
-      const gangs: GangId[] = ['loons', 'yutes', 'russians'];
+      const gangs: GangId[] = ['loons', 'yutes', 'russians', 'triads'];
       const g1 = gangs[Math.floor(Math.random() * 3)];
-      const g2 = gangs.filter(g => g !== g1)[Math.floor(Math.random() * 2)];
+      const g2 = gangs.filter(g => g !== g1)[Math.floor(Math.random() * (gangs.length - 1))];
       this.addMessage(`⚔️ Война банд: ${GANG_NAMES[g1]} vs ${GANG_NAMES[g2]}!`, '#ff2d8a');
       for (let i = 0; i < 3; i++) { this.spawnGangMember(g1); this.spawnGangMember(g2); }
     }
@@ -1382,10 +1419,10 @@ export class Game {
 
   maybeSpawnBoss() {
     if (this.totalKills < 30) return;
-    for (const g of ['loons', 'yutes', 'russians'] as GangId[]) {
+    for (const g of ['loons', 'yutes', 'russians', 'triads'] as GangId[]) {
       if (this.bossSpawned[g]) continue;
       if (Math.random() < 0.001) {
-        const type: Pedestrian['type'] = g === 'loons' ? 'gang1' : g === 'yutes' ? 'gang2' : 'gang3';
+        const type: Pedestrian['type'] = g === 'loons' ? 'gang1' : g === 'yutes' ? 'gang2' : g === 'russians' ? 'gang3' : 'gang4';
         const boss = this.spawnPedestrian(type);
         boss.health = 200;
         this.bossSpawned[g] = true;
@@ -1425,7 +1462,7 @@ export class Game {
     this.stats = { money: 5000, population: 0, day: 1, hour: 8, minute: 0, approval: 50, crime: 20, income: 0, expenses: 0 };
     this.player = { x: 80 * TILE_SIZE + TILE_SIZE / 2, y: 60 * TILE_SIZE + TILE_SIZE / 2, vx: 0, vy: 0, angle: 0, speed: 0, health: 100, maxHealth: 100, inVehicle: false, wanted: 0, ammo: 50, maxAmmo: 99, kills: 0, money: 0 };
     this.playerInVehicleId = null; this.gameOver = false; this.tickCount = 0; this.totalKills = 0;
-    this.bossSpawned = { loons: false, yutes: false, russians: false, none: false }; this.bossIds = [];
+    this.bossSpawned = { loons: false, yutes: false, russians: false, triads: false, none: false }; this.bossIds = [];
     this.deposit = 0; this.loanAmount = 0;
     this.bankInterestRate = 0.5; this.loanInterestRate = 1.5;
     this.taxRateResidential = 100; this.taxRateCommercial = 100; this.taxRateIndustrial = 100;

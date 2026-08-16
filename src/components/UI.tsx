@@ -362,6 +362,19 @@ export function UI({ game, onToolChange, onModeChange }: UIProps) {
             <button className="btn-pixel px-2 py-0.5 text-xs" onClick={() => setSettingsOpen(false)}>✕</button>
           </div>
 
+          {/* Городской автопилот — игрок всегда управляется вручную */}
+          <div className="mb-3 p-2 border border-purple-400/40 bg-purple-950/30 rounded text-[10px]">
+            <div className="flex items-center justify-between gap-2">
+              <span className="pixel-font text-purple-200">🧠 АВТОПИЛОТ ГОРОДА</span>
+              <button
+                className={`btn-pixel text-[9px] px-2 py-1 ${game.cityAutopilot ? 'active' : ''}`}
+                onClick={() => { game.cityAutopilot = !game.cityAutopilot; }}
+                aria-label="Переключить автопилот города"
+              >{game.cityAutopilot ? 'ВКЛ' : 'ВЫКЛ'}</button>
+            </div>
+            <div className="opacity-70 mt-1 leading-tight">NPC сами поддерживают кланы и транспорт. Главный игрок не получает автоуправление.</div>
+          </div>
+
           {/* Налоговые ставки */}
           <div className="pixel-font text-xs neon-yellow mb-1 border-b border-white/20 pb-0.5">💰 НАЛОГОВЫЕ СТАВКИ</div>
           <div className="text-xs space-y-2 mb-3 mt-2">

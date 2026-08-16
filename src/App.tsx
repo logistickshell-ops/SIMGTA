@@ -220,7 +220,7 @@ export default function App() {
       {/* Title overlay - top center small */}
       <div className="absolute top-0 left-1/2 -translate-x-1/2 z-20 pointer-events-none pt-1">
         <div className="pixel-font neon-pink text-xs" style={{ textShadow: '0 0 6px #ff2d8a, 2px 2px 0 #000' }}>
-          ⚡ КРИМИНАЛЬНЫЙ ГРАД ⚡
+          ⚡ URBAN FLUX — CRIMINAL CITY BUILDER ⚡
         </div>
       </div>
     </div>

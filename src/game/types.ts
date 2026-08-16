@@ -5,7 +5,7 @@ export type TileType =
   | 'stadium' | 'casino' | 'bank' | 'powerplant'
   | 'busdepot' | 'tramdepot' | 'trainstation' | 'airport' | 'gunshop';
 
-export type GangId = 'loons' | 'yutes' | 'russians' | 'none';
+export type GangId = 'loons' | 'yutes' | 'russians' | 'triads' | 'none';
 
 export interface Tile { type: TileType; level: number; population: number; hasFire: boolean; hasCrime: boolean; gang: GangId; variant: number; }
 export interface BuildingDef { type: TileType; name: string; cost: number; upkeep: number; income: number; population: number; desc: string; color: string; size: 1 | 2; category: 'zone' | 'service' | 'special'; }
@@ -30,8 +30,8 @@ export interface Vehicle {
   altitude?: number;
   lastDecisionBlock?: { x: number; y: number };
 }
-export interface Pedestrian { id: number; x: number; y: number; vx: number; vy: number; angle: number; speed: number; type: 'civilian' | 'police' | 'gang1' | 'gang2' | 'gang3' | 'firefighter' | 'medic'; gang: GangId; health: number; state: 'walking' | 'fleeing' | 'attacking' | 'dead'; weaponCooldown: number; targetId?: number; }
-export interface Bullet { id: number; x: number; y: number; vx: number; vy: number; damage: number; owner: 'player' | 'police' | 'gang1' | 'gang2' | 'gang3' | 'civilian'; life: number; }
+export interface Pedestrian { id: number; x: number; y: number; vx: number; vy: number; angle: number; speed: number; type: 'civilian' | 'police' | 'gang1' | 'gang2' | 'gang3' | 'gang4' | 'firefighter' | 'medic'; gang: GangId; health: number; state: 'walking' | 'fleeing' | 'attacking' | 'dead'; weaponCooldown: number; targetId?: number; }
+export interface Bullet { id: number; x: number; y: number; vx: number; vy: number; damage: number; owner: 'player' | 'police' | 'gang1' | 'gang2' | 'gang3' | 'gang4' | 'civilian'; life: number; }
 export interface Explosion { id: number; x: number; y: number; radius: number; maxRadius: number; life: number; maxLife: number; }
 export interface Pickup { id: number; x: number; y: number; type: 'money' | 'health' | 'ammo' | 'weapon'; amount: number; life: number; }
 export interface Particle { x: number; y: number; vx: number; vy: number; life: number; maxLife: number; color: string; size: number; }
