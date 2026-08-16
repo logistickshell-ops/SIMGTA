@@ -1,42 +1,139 @@
-/* Ночной картограф: тёмная тактическая карта, бирюзовый поток управления и янтарный ритм времени. */
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@500;600;700;800&display=swap');
 @import "tailwindcss";
-@import "tw-animate-css";
 
-:root { --ink: #061018; --panel: rgba(8, 24, 31, .92); --line: rgba(161, 203, 204, .2); --text: #eaf1f4; --muted: #94adaf; --flux: #31d7c8; --amber: #f4cf68; --danger: #f47067; --ease-out: cubic-bezier(.23,1,.32,1); }
-* { box-sizing: border-box; }
-html, body, #root { margin: 0; width: 100%; min-width: 320px; min-height: 100%; overflow: hidden; background: var(--ink); font-family: "IBM Plex Mono", monospace; color: var(--text); }
-button, input { font: inherit; }
-button { border: 0; color: inherit; cursor: pointer; }
-button:focus-visible, input:focus-visible { outline: 2px solid var(--flux); outline-offset: 2px; }
+@font-face {
+  font-family: "PressStart";
+  src: local("Courier New");
+}
 
-.urban-game-shell { position: relative; width: 100vw; height: 100vh; overflow: hidden; background: #0a1c22 url('/manus-storage/urban-flux-night-grid_0623793f.jpg') center/cover no-repeat; }
-.urban-canvas { position: absolute; inset: 0; width: 100%; height: 100%; image-rendering: pixelated; touch-action: none; }
-.corner-grain { position: absolute; inset: 0; pointer-events: none; opacity: .13; background-image: radial-gradient(rgba(214,237,234,.45) .5px, transparent .6px); background-size: 5px 5px; mix-blend-mode: overlay; }
-.game-ui { position: absolute; inset: 0; pointer-events: none; color: var(--text); font-size: 11px; }
-.game-ui button, .game-ui input { pointer-events: auto; }
-.topbar { position: absolute; z-index: 5; top: 0; left: 0; right: 0; min-height: 76px; display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 12px 18px; background: linear-gradient(180deg, rgba(4,12,18,.94), rgba(4,12,18,.68) 78%, transparent); pointer-events: auto; }
-.brand-lockup { display: flex; align-items: center; gap: 10px; min-width: 0; }.brand-mark { width: 34px; height: 34px; object-fit: contain; }.eyebrow { margin: 0; font: 600 8px/1 "IBM Plex Mono", monospace; letter-spacing: .16em; color: var(--flux); }.brand-lockup h1 { margin: 3px 0 0; font: 800 17px/.95 "Space Grotesk", sans-serif; letter-spacing: -.04em; }.brand-subtitle { margin: 3px 0 0; color: var(--muted); font-size: 8px; letter-spacing: .08em; text-transform: uppercase; }
-.topbar-metrics { display: flex; align-items: stretch; gap: 1px; border: 1px solid var(--line); background: rgba(10,27,33,.82); }.metric { min-width: 66px; display: grid; align-content: center; gap: 3px; padding: 7px 9px; border-left: 1px solid var(--line); }.metric:first-child { border-left: 0; }.metric span { color: var(--muted); font-size: 8px; text-transform: uppercase; letter-spacing: .06em; }.metric strong { font: 700 12px/1 "Space Grotesk", sans-serif; }.tone-teal { color: var(--flux); }.tone-amber { color: var(--amber); }.tone-danger { color: var(--danger); }.tone-neutral { color: #dcebea; }.icon-control { width: 33px; display: grid; place-items: center; background: rgba(49,215,200,.06); color: var(--muted); transition: color .16s var(--ease-out), background .16s var(--ease-out); }.icon-control:hover { background: rgba(49,215,200,.14); color: var(--flux); }
-.build-dock { position: absolute; z-index: 4; left: 16px; top: 94px; width: 270px; pointer-events: auto; background: var(--panel) url('/manus-storage/urban-flux-civic-pattern_aaebe498.jpg') center/cover; border: 1px solid var(--line); box-shadow: 0 16px 50px rgba(0,0,0,.24); }.build-dock::before { content: ''; position: absolute; inset: 0; pointer-events: none; background: rgba(6,16,22,.86); }.build-dock > * { position: relative; }.dock-head { display: flex; align-items: center; justify-content: space-between; padding: 11px 12px; border-bottom: 1px solid var(--line); }.dock-head strong { display: block; margin-top: 4px; font: 700 16px/1 "Space Grotesk", sans-serif; }.category-tabs { display: grid; grid-template-columns: repeat(4, 1fr); border-bottom: 1px solid var(--line); }.category-tabs button { min-height: 45px; padding: 5px 2px; background: transparent; color: var(--muted); font-size: 8px; border-right: 1px solid var(--line); transition: color .16s var(--ease-out), background .16s var(--ease-out); }.category-tabs button span { display: block; margin-bottom: 3px; color: var(--flux); font-size: 13px; }.category-tabs button.active { background: rgba(49,215,200,.1); color: var(--text); box-shadow: inset 0 -2px 0 var(--flux); }.building-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; padding: 7px; background: rgba(3,10,14,.55); }.building-card { position: relative; min-height: 57px; display: grid; grid-template-columns: 32px 1fr; grid-template-rows: 1fr 1fr; align-items: center; gap: 1px 7px; padding: 6px; text-align: left; background: rgba(16,37,44,.77); color: var(--muted); border: 1px solid transparent; transition: transform .14s var(--ease-out), border-color .14s var(--ease-out), background .14s var(--ease-out); }.building-card:hover { transform: translateY(-1px); border-color: rgba(49,215,200,.48); color: var(--text); }.building-card.active { border-color: var(--flux); background: rgba(49,215,200,.13); color: var(--text); }.building-icon { grid-row: span 2; display: grid; place-items: center; width: 30px; height: 30px; color: #f3fbf9; font: 500 16px "Space Grotesk", sans-serif; box-shadow: inset 0 0 0 1px rgba(255,255,255,.18); }.building-name { font: 600 9px/1.15 "Space Grotesk", sans-serif; }.building-cost { color: var(--amber); font-size: 9px; }.tool-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; padding: 0 7px 7px; background: rgba(3,10,14,.55); }.tool-row button { padding: 7px 3px; background: rgba(234,241,244,.05); color: var(--muted); font-size: 9px; }.tool-row button.active { background: rgba(244,207,104,.16); color: var(--amber); }.selection-card { display: grid; grid-template-columns: 28px 1fr auto; align-items: center; gap: 7px; padding: 9px 11px; border-top: 1px solid var(--line); background: rgba(5,17,23,.94); }.selection-icon { font-size: 22px; text-align: center; }.selection-card strong { display: block; font: 600 10px/1 "Space Grotesk", sans-serif; }.selection-card p { margin: 3px 0 0; color: var(--muted); font-size: 8px; line-height: 1.25; }.selection-stat { color: var(--amber); font-size: 9px; }.build-dock:not(.is-open) { width: auto; }.build-dock:not(.is-open) .dock-head { border-bottom: 0; }.build-dock:not(.is-open) .dock-head > div { display: none; }
-.city-panel { position: absolute; z-index: 4; top: 94px; right: 16px; width: 248px; max-height: calc(100vh - 190px); overflow-y: auto; pointer-events: auto; padding: 11px; background: var(--panel) url('/manus-storage/urban-flux-district-signal_0cc69949.jpg') center/cover; border: 1px solid var(--line); box-shadow: 0 16px 50px rgba(0,0,0,.24); }.city-panel::before { content: ''; position: absolute; inset: 0; pointer-events: none; background: rgba(6,16,22,.89); }.city-panel > * { position: relative; }.panel-heading { display: flex; align-items: center; gap: 6px; color: var(--flux); font: 600 9px/1 "IBM Plex Mono", monospace; letter-spacing: .08em; }.panel-heading.compact { margin-top: 13px; padding-top: 11px; border-top: 1px solid var(--line); }.pulse-grid { display: grid; grid-template-columns: repeat(2, 1fr); margin-top: 8px; border: 1px solid var(--line); }.pulse-grid .metric { padding: 7px; }.social-strip { display: flex; align-items: center; gap: 6px; margin-top: 8px; padding: 7px; color: #cce0dd; background: rgba(49,215,200,.08); font-size: 8px; line-height: 1.35; }.social-strip svg { flex: 0 0 auto; color: var(--flux); }.gang-list { margin-top: 7px; display: grid; gap: 4px; }.gang-row { display: grid; grid-template-columns: 9px 1fr auto; gap: 6px; align-items: center; font-size: 9px; }.gang-swatch { width: 7px; height: 7px; border-radius: 50%; }.gang-row small { color: var(--muted); font-size: 7px; }.mission-list { display: grid; gap: 7px; margin-top: 8px; }.mission { position: relative; padding: 7px; background: rgba(5,15,20,.65); border-left: 2px solid rgba(49,215,200,.35); }.mission > div:first-child { display: flex; gap: 5px; align-items: center; }.mission strong { font: 600 9px/1 "Space Grotesk", sans-serif; }.mission p { margin: 4px 0; color: var(--muted); font-size: 8px; }.progress-track { height: 2px; background: rgba(234,241,244,.12); }.progress-track i { display: block; height: 100%; background: var(--flux); }.mission small { position: absolute; right: 7px; bottom: 6px; color: var(--amber); font-size: 7px; }
-.tile-chip { position: absolute; z-index: 4; left: 300px; bottom: 72px; display: grid; gap: 3px; padding: 7px 9px; pointer-events: none; background: rgba(6,16,22,.83); border: 1px solid var(--line); font-size: 8px; }.tile-chip strong { font: 600 10px/1 "Space Grotesk", sans-serif; }
-.mode-switch { position: absolute; z-index: 4; top: 94px; left: 50%; display: flex; transform: translateX(-50%); pointer-events: auto; border: 1px solid var(--line); background: rgba(6,16,22,.9); }.mode-switch button { padding: 7px 10px; background: transparent; color: var(--muted); font: 600 9px "IBM Plex Mono", monospace; }.mode-switch button.active { color: var(--flux); background: rgba(49,215,200,.1); }
-.time-console { position: absolute; z-index: 5; left: 50%; bottom: 18px; transform: translateX(-50%); display: flex; align-items: stretch; overflow: hidden; pointer-events: auto; border: 1px solid rgba(161,203,204,.35); background: rgba(5,16,21,.92); box-shadow: 0 10px 30px rgba(0,0,0,.34); }.time-console button { display: flex; align-items: center; gap: 4px; padding: 9px 10px; background: transparent; color: var(--muted); font: 600 9px "IBM Plex Mono", monospace; transition: background .15s var(--ease-out), color .15s var(--ease-out); }.time-console button:hover, .time-console button.active { background: rgba(49,215,200,.14); color: var(--flux); }.time-console button.play-state.paused { color: var(--amber); }.time-console .console-divider { width: 1px; background: var(--line); }.time-console .autopilot.active { color: var(--amber); background: rgba(244,207,104,.13); }.action-readout { position: absolute; z-index: 4; bottom: 70px; left: 50%; transform: translateX(-50%); display: flex; gap: 10px; align-items: center; padding: 7px 10px; background: rgba(6,16,22,.8); border: 1px solid var(--line); color: var(--amber); font-size: 9px; pointer-events: none; }.action-readout small { color: var(--muted); font-size: 8px; }
-.modal-wrap { position: absolute; z-index: 20; inset: 0; display: grid; place-items: center; padding: 20px; pointer-events: auto; background: rgba(2,8,12,.7); backdrop-filter: blur(5px); }.finance-modal, .game-over { position: relative; width: min(380px, 100%); padding: 20px; background: #0b1e25 url('/manus-storage/urban-flux-civic-pattern_aaebe498.jpg') center/cover; border: 1px solid rgba(49,215,200,.45); box-shadow: 0 26px 80px rgba(0,0,0,.55); }.finance-modal::before { content: ''; position: absolute; inset: 0; background: rgba(6,16,22,.9); }.finance-modal > *, .game-over > * { position: relative; }.finance-modal h2, .game-over h2 { margin: 7px 0 16px; font: 700 24px/.98 "Space Grotesk", sans-serif; letter-spacing: -.04em; }.modal-close { position: absolute !important; top: 9px; right: 9px; padding: 4px; background: transparent; color: var(--muted); }.finance-summary { display: grid; grid-template-columns: repeat(3, 1fr); border: 1px solid var(--line); margin-bottom: 14px; }.finance-summary .metric { min-width: 0; padding: 7px; }.finance-modal label { display: grid; grid-template-columns: 1fr auto; gap: 6px; margin-top: 11px; color: #cfdfdc; font-size: 10px; }.finance-modal output { color: var(--amber); }.finance-modal input[type="range"] { grid-column: span 2; width: 100%; accent-color: var(--flux); }.finance-actions { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; margin-top: 17px; }.finance-actions input { grid-column: span 2; width: 100%; padding: 7px; color: var(--text); background: rgba(1,7,11,.65); border: 1px solid var(--line); }.finance-actions button, .game-over button { padding: 8px; color: var(--text); background: rgba(49,215,200,.12); border: 1px solid rgba(49,215,200,.28); font-size: 9px; }.finance-note, .game-over p { color: var(--muted); font-size: 9px; line-height: 1.5; margin: 13px 0 0; }.game-over { text-align: center; }.game-over button { margin-top: 17px; color: var(--flux); }
-@media (max-width: 900px) { .city-panel { width: 205px; }.build-dock { width: 230px; }.building-grid { grid-template-columns: 1fr; }.tile-chip { left: 250px; } .metric { min-width: 58px; } }
-@media (max-width: 680px) { .topbar { padding: 8px 10px; min-height: 62px; }.brand-mark { width: 28px; height: 28px; }.brand-lockup h1 { font-size: 14px; }.brand-subtitle, .topbar-metrics .metric:nth-child(3) { display: none; }.topbar-metrics { gap: 0; }.build-dock { top: 72px; left: 8px; width: 188px; }.city-panel { top: 72px; right: 8px; width: 170px; max-height: 50vh; padding: 8px; }.category-tabs button { font-size: 7px; }.building-card { min-height: 46px; grid-template-columns: 26px 1fr; padding: 4px; }.building-icon { width: 24px; height: 24px; font-size: 13px; }.building-name, .building-cost { font-size: 8px; }.mission p, .gang-row small, .social-strip { display: none; }.tile-chip { display: none; }.mode-switch { top: auto; bottom: 69px; }.action-readout { max-width: calc(100vw - 16px); bottom: 111px; white-space: nowrap; overflow: hidden; }.action-readout small { display: none; }.time-console { bottom: 8px; width: calc(100vw - 16px); justify-content: center; }.time-console button { flex: 1; justify-content: center; padding: 9px 4px; font-size: 8px; }.time-console .autopilot { flex: 1.5; } }
-@media (prefers-reduced-motion: no-preference) { .build-dock, .city-panel { animation: dock-in .28s var(--ease-out) both; } @keyframes dock-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } } }
-@media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; } }
+* {
+  box-sizing: border-box;
+}
 
-/* Иерархия Ночного картографа: нейтральная навигация, яркий Flux Teal только для действия. */
-.panel-heading { color: #dce8e6; }
-.panel-heading svg, .social-strip svg { color: var(--muted); }
-.pulse-grid .metric strong { font-size: 15px; letter-spacing: -.03em; }
-.mission { border-left-color: rgba(180, 202, 199, .3); }
-.building-card.active .building-icon, .category-tabs button.active span { box-shadow: 0 0 0 1px rgba(49,215,200,.35), 0 0 16px rgba(49,215,200,.16); }
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background: #0a0a14;
+  font-family: "Courier New", monospace;
+  color: #fff;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+  overscroll-behavior: none;
+}
 
-.energy-strip { display: flex; align-items: center; gap: 7px; margin-top: 8px; padding: 7px; color: #b8d9d3; background: rgba(49,215,200,.08); border-left: 2px solid var(--flux); }
-.energy-strip svg { color: var(--flux); flex: 0 0 auto; }.energy-strip div { display: grid; gap: 2px; }.energy-strip strong { font: 600 8px/1 "IBM Plex Mono", monospace; letter-spacing: .08em; }.energy-strip span { color: var(--muted); font-size: 7px; }.energy-strip.outage { color: #ffd5cb; background: rgba(244,112,103,.1); border-left-color: var(--danger); }.energy-strip.outage svg { color: var(--danger); }
-.demand-strip { margin-top: 9px; }.demand-row { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 4px 7px; margin-top: 7px; color: var(--muted); font-size: 8px; }.demand-row span { display: flex; justify-content: space-between; gap: 8px; }.demand-row b { color: var(--text); font-weight: 500; }.demand-row i { grid-column: span 2; display: block; height: 3px; background: rgba(234,241,244,.12); }.demand-row em { display: block; height: 100%; transition: width .25s var(--ease-out); }.tile-chip small { color: var(--muted); font-size: 7px; }
-@media (max-width: 680px) { .energy-strip span { font-size: 6px; }.demand-strip { display: none; } }
+canvas {
+  image-rendering: pixelated;
+  image-rendering: -moz-crisp-edges;
+  image-rendering: crisp-edges;
+  display: block;
+}
+
+.pixel-font {
+  font-family: "Courier New", "Consolas", monospace;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-shadow: 2px 2px 0 #000;
+}
+
+.neon-pink {
+  color: #ff2d8a;
+  text-shadow: 0 0 8px #ff2d8a, 2px 2px 0 #000;
+}
+
+.neon-cyan {
+  color: #00f0ff;
+  text-shadow: 0 0 8px #00f0ff, 2px 2px 0 #000;
+}
+
+.neon-green {
+  color: #39ff14;
+  text-shadow: 0 0 8px #39ff14, 2px 2px 0 #000;
+}
+
+.neon-yellow {
+  color: #ffea00;
+  text-shadow: 0 0 8px #ffea00, 2px 2px 0 #000;
+}
+
+.neon-orange {
+  color: #ff8c00;
+  text-shadow: 0 0 8px #ff8c00, 2px 2px 0 #000;
+}
+
+.btn-pixel {
+  border: 2px solid #fff;
+  background: rgba(0, 0, 0, 0.7);
+  padding: 6px 12px;
+  color: #fff;
+  font-family: "Courier New", monospace;
+  font-weight: bold;
+  cursor: pointer;
+  text-shadow: 1px 1px 0 #000;
+  transition: all 0.1s;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.btn-pixel:hover {
+  background: rgba(255, 255, 255, 0.2);
+  transform: translate(-1px, -1px);
+  box-shadow: 3px 3px 0 #000;
+}
+
+.btn-pixel:active {
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0 #000;
+}
+
+.btn-pixel.active {
+  background: #00f0ff;
+  color: #000;
+  border-color: #00f0ff;
+  box-shadow: 0 0 12px #00f0ff, 2px 2px 0 #000;
+}
+
+.panel-pixel {
+  background: rgba(10, 10, 25, 0.92);
+  border: 3px solid #00f0ff;
+  box-shadow: 0 0 0 2px #000, 0 0 24px rgba(0, 240, 255, 0.4);
+}
+
+@keyframes blink {
+  0%, 50% { opacity: 1; }
+  50.01%, 100% { opacity: 0.3; }
+}
+
+.blink {
+  animation: blink 1s infinite;
+}
+
+@keyframes pulse-neon {
+  0%, 100% { box-shadow: 0 0 8px currentColor, 0 0 16px currentColor; }
+  50% { box-shadow: 0 0 4px currentColor, 0 0 8px currentColor; }
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #0a0a14;
+}
+::-webkit-scrollbar-thumb {
+  background: #00f0ff;
+  border: 1px solid #000;
+}
+
+@media (max-width: 640px) {
+  .panel-pixel {
+    border-width: 2px;
+    box-shadow: 0 0 0 1px #000, 0 0 14px rgba(0, 240, 255, 0.35);
+  }
+
+  .btn-pixel {
+    border-width: 2px;
+    padding: 6px 8px;
+  }
+}

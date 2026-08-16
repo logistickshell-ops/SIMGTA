@@ -1,25 +1,38 @@
-// Ночной картограф: ядро симуляции держит город читаемым — решения NPC редкие, локальные и видимы на карте.
-import type { BuildingInstance, GameStats, GangId, Message, Mission, Particle, Pedestrian, Player, Profession, Tile, TileType, Vehicle, Bullet, Explosion, Pickup } from './types';
-import { BUILDINGS, DAY_LENGTH_MS, GANG_COLORS, GANGS, MAP_HEIGHT, MAP_WIDTH, MISSION_TEMPLATES, TILE_SIZE } from './constants';
+import {
+  Tile, TileType, Player, Vehicle, Pedestrian, Bullet, Explosion, Pickup, Particle, Message, Mission, GameStats, GangId
+} from './types';
+import {
+  TILE_SIZE, MAP_WIDTH, MAP_HEIGHT, BUILDINGS, MISSION_TEMPLATES, GANG_NAMES, GANG_COLORS
+} from './constants';
 
-export type Tool = 'select' | 'bulldoze' | 'inspect' | Exclude<TileType, 'grass' | 'water'>;
+export type Tool =
+  | 'select' | 'bulldoze' | 'inspect'
+  | 'residential' | 'commercial' | 'industrial' | 'road' | 'park'
+  | 'policestation' | 'hospital' | 'firestation' | 'school'
+  | 'stadium' | 'casino' | 'bank' | 'powerplant'
+  | 'busdepot' | 'tramdepot' | 'trainstation' | 'airport' | 'gunshop';
+
 export type GameMode = 'strategy' | 'action';
-export type SimulationSpeed = 1 | 2 | 5;
 
-export interface Camera { x: number; y: number; zoom: number; }
-export interface Input { mouseX: number; mouseY: number; mouseDown: boolean; rightDown: boolean; keys: Record<string, boolean>; }
+export interface Camera {
+  x: number;
+  y: number;
+  zoom: number;
+}
 
-const GANG_IDS: Exclude<GangId, 'none'>[] = ['loons', 'yutes', 'russians', 'ashdogs'];
-const PROFESSION_FOR_BUILDING: Partial<Record<TileType, Profession>> = {
-  commercial: 'shopkeeper', industrial: 'worker', school: 'teacher', policestation: 'officer',
-  hospital: 'medic', firestation: 'firefighter', busdepot: 'driver', tramdepot: 'driver', trainstation: 'driver', airport: 'driver',
-};
+export interface Input {
+  mouseX: number;
+  mouseY: number;
+  mouseDown: boolean;
+  rightDown: boolean;
+  keys: Record<string, boolean>;
+}
+
 let nextId = 1;
-const uid = () => nextId++;
+export const uid = () => nextId++;
 
 export class Game {
   tiles: Tile[][] = [];
-  buildings: BuildingInstance[] = [];
   stats: GameStats;
   player: Player;
   vehicles: Vehicle[] = [];
@@ -37,263 +50,445 @@ export class Game {
   tool: Tool = 'residential';
   hoveredTile = { x: -1, y: -1 };
   selectedTile = { x: -1, y: -1 };
+  showGrid = true;
   paused = false;
-  speed: SimulationSpeed = 1;
-  autopilot = false;
-  autopilotTarget: { x: number; y: number; label: string } | null = null;
-  autopilotPath: { x: number; y: number }[] = [];
   gameOver = false;
+  difficulty: 'easy' | 'normal' | 'hard' = 'normal';
+  timeAccumulator = 0;
+  cameraFollowPlayer = false;
+  shootingCooldown = 0;
+  playerInVehicleId: number | null = null;
+  wantedDecayTimer = 0;
+  messageIdCounter = 0;
+  lastCrimeSpawn = 0;
+  lastFireSpawn = 0;
+  lastTaxTick = 0;
   dayNightCycle = 0;
-  mouseX = 0;
-  mouseY = 0;
   tickCount = 0;
   totalKills = 0;
   totalEarned = 0;
-  timeAccumulator = 0;
-  shootingCooldown = 0;
-  playerInVehicleId: number | null = null;
-  messageIdCounter = 0;
+  policePatrolTimer = 0;
+  publicTransportTimer = 0;
+  gangWarTimer = 0;
+  bossSpawned: Record<GangId, boolean> = { loons: false, yutes: false, russians: false, none: false };
+  bossIds: number[] = [];
   superWeapon = false;
   superWeaponTimer = 0;
-  deposit = 0;
-  loanAmount = 0;
-  bankInterestRate = 0.5;
-  loanInterestRate = 1.5;
-  taxRateResidential = 100;
+  mouseX = 0;
+  mouseY = 0;
+
+  // ---------- ЭКОНОМИКА ----------
+  deposit = 0; // сумма на депозите в банке
+  bankInterestRate = 0.5; // % в час по депозиту (0-5)
+  taxRateResidential = 100; // % от базовой ставки (0-300)
   taxRateCommercial = 100;
   taxRateIndustrial = 100;
-  private npcStride = 3;
-  private spatialGrid = new Map<string, Pedestrian[]>();
-  private lastGridTick = -1;
-  private lastIncidentTick = 0;
-  private lastGangTick = 0;
-  private lastAssignmentTick = 0;
-  private lastCityTick = 0;
-  private roadGraph = new Map<string, { x: number; y: number; neighbors: { x: number; y: number; cost: number }[] }>();
-  private roadGraphDirty = true;
-  private tramGraph = new Map<string, { x: number; y: number; neighbors: { x: number; y: number; cost: number }[] }>();
-  private railGraph = new Map<string, { x: number; y: number; neighbors: { x: number; y: number; cost: number }[] }>();
-  private transitGraphDirty = true;
-  private routePlanBudget = 0;
-  private junctionReservations = new Map<string, { vehicleId: number; expires: number }>();
-  private lastSaveTick = 0;
-  private readonly saveKey = 'urban-flux-city-v2';
+  loanAmount = 0; // кредит банка
+  loanInterestRate = 1.5; // % в час по кредиту
+
+  /** Глобальный множитель дохода (день/ночь) */
+  get taxMultiplier() {
+    // Днём (8–20) множитель 1.0, ночью 0.4
+    const h = this.stats.hour;
+    return (h >= 8 && h < 20) ? 1.0 : 0.4;
+  }
 
   constructor() {
-    this.stats = { money: 5000, population: 0, day: 1, hour: 8, minute: 0, approval: 55, crime: 12, income: 0, expenses: 0, community: 34, employment: 0, activeWorkers: 0, zoneDemand: { residential: 58, commercial: 46, industrial: 40 }, energy: { produced: 0, consumed: 0, coverage: 0, overload: 0, outage: true }, lastSavedAt: 0 };
-    this.player = { x: 80 * TILE_SIZE, y: 60 * TILE_SIZE, vx: 0, vy: 0, angle: 0, speed: 0, health: 100, maxHealth: 100, inVehicle: false, wanted: 0, ammo: 50, maxAmmo: 99, kills: 0, money: 0 };
+    this.stats = {
+      money: 5000,
+      population: 0,
+      day: 1,
+      hour: 8,
+      minute: 0,
+      approval: 50,
+      crime: 20,
+      income: 0,
+      expenses: 0,
+    };
+    this.player = {
+      x: 80 * TILE_SIZE, y: 60 * TILE_SIZE, vx: 0, vy: 0, angle: 0,
+      speed: 0, health: 100, maxHealth: 100, inVehicle: false, wanted: 0,
+      ammo: 50, maxAmmo: 99, kills: 0, money: 0,
+    };
     this.initMap();
-    this.seedCivicCore();
     this.initMissions();
     this.spawnStartingEntities();
-    this.centerCameraOnPlayer();
-    this.loadGame();
-  }
-
-  get taxMultiplier() { return this.stats.hour >= 7 && this.stats.hour < 21 ? 1 : 0.45; }
-  get speedLabel() { return this.paused ? 'ПАУЗА' : `×${this.speed}`; }
-
-  saveGame(quiet = false) {
-    if (typeof localStorage === 'undefined') return false;
-    const payload = {
-      version: 2,
-      savedAt: Date.now(),
-      stats: this.stats,
-      player: this.player,
-      tiles: this.tiles,
-      buildings: this.buildings,
-      vehicles: this.vehicles,
-      pedestrians: this.pedestrians,
-      missions: this.missions,
-      camera: this.camera,
-      mode: this.mode,
-      tool: this.tool,
-      speed: this.speed,
-      deposit: this.deposit,
-      loanAmount: this.loanAmount,
-      taxRateResidential: this.taxRateResidential,
-      taxRateCommercial: this.taxRateCommercial,
-      taxRateIndustrial: this.taxRateIndustrial,
-      totalKills: this.totalKills,
-      totalEarned: this.totalEarned,
-    };
-    try {
-      localStorage.setItem(this.saveKey, JSON.stringify(payload));
-      this.stats.lastSavedAt = payload.savedAt;
-      if (!quiet) this.addMessage('Город сохранён локально', '#31d7c8');
-      return true;
-    } catch {
-      if (!quiet) this.addMessage('Не удалось сохранить город', '#f47067');
-      return false;
-    }
-  }
-
-  loadGame() {
-    if (typeof localStorage === 'undefined') return false;
-    try {
-      const raw = localStorage.getItem(this.saveKey);
-      if (!raw) return false;
-      const saved = JSON.parse(raw) as any;
-      const version = saved.version ?? 1;
-      if ((version !== 1 && version !== 2) || !saved.stats) return false;
-      const defaults = this.stats;
-      this.stats = { ...defaults, ...saved.stats, zoneDemand: { ...defaults.zoneDemand, ...(saved.stats.zoneDemand ?? {}) }, energy: { ...defaults.energy, ...(saved.stats.energy ?? {}) } };
-      if (saved.player) this.player = saved.player;
-      if (Array.isArray(saved.tiles) && Array.isArray(saved.buildings)) { this.tiles = saved.tiles; this.buildings = saved.buildings; }
-      this.vehicles = saved.vehicles ?? this.vehicles;
-      this.pedestrians = saved.pedestrians ?? this.pedestrians;
-      this.missions = saved.missions ?? this.missions;
-      if (saved.camera) this.camera = saved.camera;
-      this.mode = saved.mode ?? this.mode;
-      this.tool = saved.tool ?? this.tool;
-      this.speed = saved.speed ?? this.speed;
-      this.deposit = saved.deposit ?? 0;
-      this.loanAmount = saved.loanAmount ?? 0;
-      this.taxRateResidential = saved.taxRateResidential ?? 100;
-      this.taxRateCommercial = saved.taxRateCommercial ?? 100;
-      this.taxRateIndustrial = saved.taxRateIndustrial ?? 100;
-      this.totalKills = saved.totalKills ?? 0;
-      this.totalEarned = saved.totalEarned ?? 0;
-      this.roadGraphDirty = true;
-      this.transitGraphDirty = true;
-      this.rebuildSpatialGrid();
-      return true;
-    } catch {
-      localStorage.removeItem(this.saveKey);
-      return false;
-    }
-  }
-
-  clearSavedGame() { if (typeof localStorage !== 'undefined') localStorage.removeItem(this.saveKey); }
-
-  setSpeed(speed: SimulationSpeed) { this.speed = speed; this.paused = false; }
-  setMode(mode: GameMode) {
-    if (this.mode === mode) return;
-    this.mode = mode;
-    this.mouseX = this.viewportWidth / 2; this.mouseY = this.viewportHeight / 2;
-    this.autopilot = false; this.autopilotTarget = null; this.autopilotPath = [];
-    if (mode === 'strategy') { this.playerInVehicleId = null; this.player.inVehicle = false; }
-    this.rebuildSpatialGrid();
-    this.addMessage(mode === 'action' ? 'Городской режим активен' : 'Карта управления активна', '#31d7c8');
-  }
-  togglePause() { this.paused = !this.paused; }
-  toggleAutopilot() {
-    if (this.autopilot) { this.autopilot = false; this.autopilotTarget = null; this.autopilotPath = []; this.addMessage('Автопилот отключён', '#aeb9c4'); return; }
-    const safeHub = this.getNearestBuilding(this.player.x, this.player.y, ['park', 'policestation', 'hospital', 'bank']) ?? this.getNearestBuilding(this.player.x, this.player.y);
-    if (!safeHub) return;
-    this.autopilotTarget = { x: (safeHub.x + safeHub.size / 2) * TILE_SIZE, y: (safeHub.y + safeHub.size / 2) * TILE_SIZE, label: BUILDINGS[safeHub.type].name };
-    this.autopilotPath = this.findRoadPath(this.player.x, this.player.y, this.autopilotTarget.x, this.autopilotTarget.y);
-    this.autopilot = this.autopilotPath.length > 0;
-    if (this.autopilot) this.addMessage(`Автопилот: ${this.autopilotPath.length} узлов до ${this.autopilotTarget.label}`, '#31d7c8');
-    else { this.autopilotTarget = null; this.addMessage('Нет связного дорожного маршрута', '#f47067'); }
   }
 
   initMap() {
+    // Карта 160×120 — город в центральной части [40..120]×[30..90]
     this.tiles = [];
+    const cityMinX = 40; const cityMaxX = 120;
+    const cityMinY = 30; const cityMaxY = 90;
+
     for (let y = 0; y < MAP_HEIGHT; y++) {
       const row: Tile[] = [];
       for (let x = 0; x < MAP_WIDTH; x++) {
-        const water = (x < 4 && y < 4) || (x > MAP_WIDTH - 5 && y > MAP_HEIGHT - 5) || (x < 4 && y > MAP_HEIGHT - 5) || (x > MAP_WIDTH - 5 && y < 4);
-        const inCity = x >= 34 && x <= 126 && y >= 24 && y <= 96;
-        const road = inCity && ([48, 49, 68, 69, 88, 89, 108, 109].includes(x) || [38, 39, 54, 55, 70, 71, 86, 87].includes(y));
-        row.push({ type: water ? 'water' : road ? 'road' : 'grass', level: 0, population: 0, hasFire: false, hasCrime: false, gang: 'none', variant: (x * 7 + y * 11) % 4 });
+        let type: TileType = 'grass';
+        // Небольшие водоёмы по дальним углам
+        if ((x < 4 && y < 4) || (x > MAP_WIDTH - 5 && y > MAP_HEIGHT - 5)) type = 'water';
+        if ((x < 4 && y > MAP_HEIGHT - 5) || (x > MAP_WIDTH - 5 && y < 4)) type = 'water';
+
+        if (x >= cityMinX && x < cityMaxX && y >= cityMinY && y < cityMaxY) {
+          // Двухполосные магистрали только внутри города
+          if (x === 60 || x === 61 || x === 80 || x === 81 || x === 100 || x === 101) type = 'road';
+          if (y === 44 || y === 45 || y === 60 || y === 61 || y === 76 || y === 77) type = 'road';
+        }
+        row.push({ type, level: 0, population: 0, hasFire: false, hasCrime: false, gang: 'none', variant: Math.floor(Math.random() * 4) });
       }
       this.tiles.push(row);
     }
   }
 
-  private seedCivicCore() {
-    this.createBuilding('residential', 74, 58, false);
-    this.createBuilding('residential', 76, 58, false);
-    this.createBuilding('commercial', 74, 62, false);
-    this.createBuilding('park', 78, 62, false);
-    this.createBuilding('policestation', 82, 58, false);
-    this.createBuilding('school', 72, 66, false);
-    this.createBuilding('powerplant', 84, 66, false);
+  initMissions() {
+    this.missions = MISSION_TEMPLATES.map(m => ({ ...m, progress: 0, active: true, completed: false }));
   }
-
-  initMissions() { this.missions = MISSION_TEMPLATES.map(m => ({ ...m, progress: 0, active: true, completed: false })); }
 
   spawnStartingEntities() {
-    for (let i = 0; i < 16; i++) this.spawnRandomVehicle();
-    for (let i = 0; i < 54; i++) this.spawnPedestrian('civilian');
-    for (const gang of GANG_IDS) {
-      for (let i = 0; i < 3; i++) this.spawnGangMember(gang);
-      this.spawnGangVehicle(gang);
-    }
-    this.refreshAssignments();
+    for (let i = 0; i < 8; i++) this.spawnRandomVehicle();
+    for (let i = 0; i < 20; i++) this.spawnPedestrian('civilian');
   }
 
-  private makeTile(type: TileType, buildingId?: number): Tile {
-    return { type, level: type === 'residential' ? 1 : 0, population: 0, hasFire: false, hasCrime: false, gang: 'none', variant: Math.floor(Math.random() * 4), buildingId, powered: type === 'powerplant' };
+  spawnRandomVehicle() {
+    const types: Vehicle['type'][] = ['car', 'car', 'car', 'sport', 'taxi'];
+    const type = types[Math.floor(Math.random() * types.length)];
+    const pos = this.getRandomRoadPosition();
+    this.vehicles.push({
+      id: uid(), x: pos.x, y: pos.y, vx: 0, vy: 0, angle: pos.angle ?? 0,
+      speed: 0, health: 100, type, gang: 'none', driver: 'civilian', passengers: 0,
+    });
   }
 
-  private createBuilding(type: TileType, x: number, y: number, charge = true) {
-    const def = BUILDINGS[type];
-    if (charge && this.stats.money < def.cost) { this.addMessage('Недостаточно бюджета', '#f47067'); return false; }
-    if (!this.canPlace(x, y, type)) return false;
-    const id = uid();
-    if (charge) this.stats.money -= def.cost;
-    this.buildings.push({ id, type, x, y, size: def.size });
-    if (['road', 'bridge', 'tramrail', 'rail', 'river'].includes(type)) { this.roadGraphDirty = true; this.transitGraphDirty = true; }
-    for (let oy = 0; oy < def.size; oy++) for (let ox = 0; ox < def.size; ox++) this.tiles[y + oy][x + ox] = this.makeTile(type, id);
-    if (charge) {
-      this.emitParticles((x + def.size / 2) * TILE_SIZE, (y + def.size / 2) * TILE_SIZE, '#31d7c8', 8);
-      this.addMessage(`${def.name}: подключено`, '#69d9c8');
-    }
-    this.refreshAssignments();
-    if (type === 'tramdepot') this.spawnTransitVehicle('tram', x, y);
-    if (type === 'trainstation') this.spawnTransitVehicle('train', x, y);
-    return true;
+  spawnPedestrian(type: Pedestrian['type'], x?: number, y?: number, gang: GangId = 'none'): Pedestrian {
+    const px = x ?? 5 * TILE_SIZE + Math.random() * (MAP_WIDTH - 10) * TILE_SIZE;
+    const py = y ?? 5 * TILE_SIZE + Math.random() * (MAP_HEIGHT - 10) * TILE_SIZE;
+    const ped: Pedestrian = {
+      id: uid(), x: px, y: py, vx: 0, vy: 0, angle: Math.random() * Math.PI * 2,
+      speed: 0.5 + Math.random() * 0.5, type, gang,
+      health: type === 'police' ? 80 : type.startsWith('gang') ? 60 : 40,
+      state: 'walking', weaponCooldown: 0,
+    };
+    this.pedestrians.push(ped);
+    return ped;
   }
 
-  canPlace(x: number, y: number, type: Tool | TileType): boolean {
-    if (type === 'select' || type === 'inspect' || type === 'bulldoze') return true;
-    const def = BUILDINGS[type];
-    if (!def || x < 0 || y < 0 || x + def.size > MAP_WIDTH || y + def.size > MAP_HEIGHT) return false;
-    if (def.size === 2 && (x % 2 !== 0 || y % 2 !== 0)) return false;
-    for (let oy = 0; oy < def.size; oy++) for (let ox = 0; ox < def.size; ox++) {
-      const t = this.tiles[y + oy][x + ox];
-      const allowed = type === 'river' ? t.type === 'grass'
-        : type === 'bridge' ? (t.type === 'river' || t.type === 'water')
-        : type === 'tramrail' || type === 'rail' ? (t.type === 'grass' || t.type === 'road' || t.type === type)
-        : t.type === 'grass' || (type === 'road' && t.type === 'road');
-      if (!allowed) return false;
+  spawnGangMember(gang: GangId) {
+    let sx = 0, sy = 0, found = 0;
+    for (let a = 0; a < 20 && !found; a++) {
+      const tx = Math.floor(Math.random() * MAP_WIDTH);
+      const ty = Math.floor(Math.random() * MAP_HEIGHT);
+      if (this.tiles[ty][tx].gang === gang) { sx = tx; sy = ty; found = 1; }
     }
-    return true;
+    if (!found) { sx = 5 + Math.floor(Math.random() * (MAP_WIDTH - 10)); sy = 5 + Math.floor(Math.random() * (MAP_HEIGHT - 10)); }
+    const type: Pedestrian['type'] = gang === 'loons' ? 'gang1' : gang === 'yutes' ? 'gang2' : 'gang3';
+    this.spawnPedestrian(type, sx * TILE_SIZE, sy * TILE_SIZE, gang);
+  }
+
+  addMessage(text: string, color: string = '#ffffff', x?: number, y?: number) {
+    this.messages.push({
+      id: this.messageIdCounter++,
+      text, color, life: 180,
+      x: x ?? this.player.x, y: y ?? this.player.y,
+    });
+  }
+
+  emitParticles(x: number, y: number, color: string, count: number, speed: number = 2) {
+    for (let i = 0; i < count; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const v = Math.random() * speed;
+      this.particles.push({
+        x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v,
+        life: 30 + Math.random() * 30, maxLife: 60, color, size: 1 + Math.floor(Math.random() * 3),
+      });
+    }
+  }
+
+  // ----------------------------------------------------------------
+  //   БАЗОВЫЕ ПРОВЕРКИ ПРОХОДИМОСТИ
+  // ----------------------------------------------------------------
+  /** Можно ли пройти по тайлу (x,y) */
+  isWalkableTile(x: number, y: number): boolean {
+    if (x < 0 || y < 0 || x >= MAP_WIDTH || y >= MAP_HEIGHT) return false;
+    const t = this.tiles[y][x];
+    return t.type === 'grass' || t.type === 'road';
+  }
+
+  isRoadTile(x: number, y: number): boolean {
+    if (x < 0 || y < 0 || x >= MAP_WIDTH || y >= MAP_HEIGHT) return false;
+    return this.tiles[y][x].type === 'road';
+  }
+
+  isRoadPosition(worldX: number, worldY: number, margin = 8): boolean {
+    void margin;
+    return this.isRoadTile(Math.floor(worldX / TILE_SIZE), Math.floor(worldY / TILE_SIZE));
+  }
+
+  getRandomRoadPosition() {
+    for (let i = 0; i < 200; i++) {
+      const x = Math.floor(Math.random() * MAP_WIDTH);
+      const y = Math.floor(Math.random() * MAP_HEIGHT);
+      if (this.isRoadTile(x, y)) {
+        const dirs = this.getRoadDirectionsFromTile(x, y);
+        const dir = dirs[Math.floor(Math.random() * Math.max(1, dirs.length))] ?? { dx: 1, dy: 0, angle: 0 };
+        return { ...this.getLaneCenter(x, y, dir.angle), angle: dir.angle };
+      }
+    }
+    return { ...this.getLaneCenter(80, 60, 0), angle: 0 };
+  }
+
+  findNearestRoadPosition(worldX: number, worldY: number) {
+    const sx = Math.floor(worldX / TILE_SIZE);
+    const sy = Math.floor(worldY / TILE_SIZE);
+    for (let r = 0; r < Math.max(MAP_WIDTH, MAP_HEIGHT); r++) {
+      for (let y = sy - r; y <= sy + r; y++) {
+        for (let x = sx - r; x <= sx + r; x++) {
+          if (this.isRoadTile(x, y)) {
+            const dirs = this.getRoadDirectionsFromTile(x, y);
+            const dir = dirs[0] ?? { dx: 1, dy: 0, angle: 0 };
+            return { ...this.getLaneCenter(x, y, dir.angle), angle: dir.angle };
+          }
+        }
+      }
+    }
+    return this.getRandomRoadPosition();
+  }
+
+  getRoadDirections(worldX: number, worldY: number) {
+    const tx = Math.floor(worldX / TILE_SIZE);
+    const ty = Math.floor(worldY / TILE_SIZE);
+    return this.getRobustRoadDirections(tx, ty);
+  }
+
+  getRobustRoadDirections(tx: number, ty: number) {
+    const isEvenX = tx % 2 === 0;
+    const isEvenY = ty % 2 === 0;
+    const legalDirs: { dx: number; dy: number; angle: number }[] = [];
+
+    // Горизонтальные полосы
+    if (isEvenY) {
+      // Верхняя полоса горизонтальной дороги -> едем на Запад (влево, angle PI)
+      legalDirs.push({ dx: -1, dy: 0, angle: Math.PI });
+    } else {
+      // Нижняя полоса горизонтальной дороги -> едем на Восток (вправо, angle 0)
+      legalDirs.push({ dx: 1, dy: 0, angle: 0 });
+    }
+
+    // Вертикальные полосы
+    if (isEvenX) {
+      // Левая полоса вертикальной дороги -> едем на Юг (вниз, angle PI/2)
+      legalDirs.push({ dx: 0, dy: 1, angle: Math.PI / 2 });
+    } else {
+      // Правая полоса вертикальной дороги -> едем на Север (вверх, angle -PI/2)
+      legalDirs.push({ dx: 0, dy: -1, angle: -Math.PI / 2 });
+    }
+
+    // Оставляем только те направления, где действительно построена дорога
+    const filtered = legalDirs.filter(d => this.isRoadTile(tx + d.dx, ty + d.dy));
+    if (filtered.length > 0) return filtered;
+
+    // Если тупик — разрешаем любое дорожное направление
+    const allDirs = [
+      { dx: 1, dy: 0, angle: 0 },
+      { dx: -1, dy: 0, angle: Math.PI },
+      { dx: 0, dy: 1, angle: Math.PI / 2 },
+      { dx: 0, dy: -1, angle: -Math.PI / 2 },
+    ];
+    return allDirs.filter(d => this.isRoadTile(tx + d.dx, ty + d.dy));
+  }
+
+  getRoadDirectionsFromTile(tx: number, ty: number) {
+    return this.getRobustRoadDirections(tx, ty);
+  }
+
+  cardinalDirection(angle: number) {
+    const dirs = [
+      { dx: 1, dy: 0, angle: 0 },
+      { dx: -1, dy: 0, angle: Math.PI },
+      { dx: 0, dy: 1, angle: Math.PI / 2 },
+      { dx: 0, dy: -1, angle: -Math.PI / 2 },
+    ];
+    return dirs.reduce((best, dir) => {
+      const delta = Math.abs(Math.atan2(Math.sin(dir.angle - angle), Math.cos(dir.angle - angle)));
+      const bestDelta = Math.abs(Math.atan2(Math.sin(best.angle - angle), Math.cos(best.angle - angle)));
+      return delta < bestDelta ? dir : best;
+    }, dirs[0]);
+  }
+
+  getLaneCenter(tx: number, ty: number, angle: number) {
+    // Безупречное 100% строгое правостороннее движение для 2x2 дорожной сетки:
+    // На горизонтальных дорогах: Запад (←) = чётный ряд (by), Восток (→) = нечётный ряд (by + 1).
+    // На вертикальных дорогах: Юг (↓) = чётная колонка (bx), Север (↑) = нечётная колонка (bx + 1).
+    const dir = this.cardinalDirection(angle);
+    const bx = tx - (tx % 2);
+    const by = ty - (ty % 2);
+
+    let bestTx = tx;
+    let bestTy = ty;
+
+    if (dir.dx > 0) {
+      // Восток (вправо) -> нечётный ряд
+      bestTy = by + 1;
+    } else if (dir.dx < 0) {
+      // Запад (влево) -> чётный ряд
+      bestTy = by;
+    } else if (dir.dy > 0) {
+      // Юг (вниз) -> чётная колонка
+      bestTx = bx;
+    } else if (dir.dy < 0) {
+      // Север (вверх) -> нечётная колонка
+      bestTx = bx + 1;
+    }
+
+    return {
+      x: bestTx * TILE_SIZE + TILE_SIZE / 2,
+      y: bestTy * TILE_SIZE + TILE_SIZE / 2,
+    };
+  }
+
+  hasVehicleAhead(v: Vehicle, angle: number, distance = 24) {
+    const dir = this.cardinalDirection(angle);
+    // Проверка других машин
+    for (const other of this.vehicles) {
+      if (other === v || other.health <= 0) continue;
+      const dx = other.x - v.x;
+      const dy = other.y - v.y;
+      const forward = dx * dir.dx + dy * dir.dy;
+      const side = Math.abs(dir.dx !== 0 ? dy : dx);
+      if (forward > 0 && forward < distance && side < 11) return true;
+    }
+    // Проверка пешеходов
+    for (const p of this.pedestrians) {
+      if (p.state === 'dead') continue;
+      const dx = p.x - v.x;
+      const dy = p.y - v.y;
+      const forward = dx * dir.dx + dy * dir.dy;
+      const side = Math.abs(dir.dx !== 0 ? dy : dx);
+      if (forward > 0 && forward < distance && side < 8) return true;
+    }
+    // Проверка игрока (если он пешком)
+    if (this.playerInVehicleId !== v.id) {
+      const dx = this.player.x - v.x;
+      const dy = this.player.y - v.y;
+      const forward = dx * dir.dx + dy * dir.dy;
+      const side = Math.abs(dir.dx !== 0 ? dy : dx);
+      if (forward > 0 && forward < distance && side < 8) return true;
+    }
+    return false;
+  }
+
+  /** Проверка коллизии точки с прямоугольниками (здания, машины-препятствия) */
+  isBlockedByBuilding(worldX: number, worldY: number, margin = 4): boolean {
+    // Проверяем несколько точек объекта на непроходимость
+    const offsets = [
+      [0, 0], [margin, 0], [0, margin], [-margin, 0], [0, -margin],
+      [margin, margin], [-margin, -margin],
+    ];
+    for (const [ox, oy] of offsets) {
+      const xx = Math.floor((worldX + ox) / TILE_SIZE);
+      const yy = Math.floor((worldY + oy) / TILE_SIZE);
+      if (xx < 0 || yy < 0 || xx >= MAP_WIDTH || yy >= MAP_HEIGHT) return true;
+      if (!this.isWalkableTile(xx, yy)) return true;
+    }
+    return false;
+  }
+
+  /** Не даём объекту въехать в стену */
+  clampToWalkable(obj: { x: number; y: number }, margin = 4) {
+    for (let attempt = 0; attempt < 8; attempt++) {
+      if (!this.isBlockedByBuilding(obj.x, obj.y, margin)) return;
+      // отталкиваем назад от центра ближайшего непроходимого тайла
+      const tx = Math.floor(obj.x / TILE_SIZE);
+      const ty = Math.floor(obj.y / TILE_SIZE);
+      const cx = tx * TILE_SIZE + TILE_SIZE / 2;
+      const cy = ty * TILE_SIZE + TILE_SIZE / 2;
+      const dx = obj.x - cx;
+      const dy = obj.y - cy;
+      const d = Math.hypot(dx, dy) || 1;
+      obj.x += (dx / d) * 2;
+      obj.y += (dy / d) * 2;
+    }
+  }
+
+  /** Проверка столкновения игрока/машины с другими машинами */
+  resolveVehicleCollision(a: { x: number; y: number; vx: number; vy: number }, margin = 12) {
+    for (const other of this.vehicles) {
+      if (other === a || other.health <= 0) continue;
+      if (Math.hypot(other.x - a.x, other.y - a.y) < margin) {
+        const dx = a.x - other.x || 0.01;
+        const dy = a.y - other.y || 0.01;
+        const d = Math.hypot(dx, dy);
+        const push = (margin - d) * 0.3;
+        (a as any).x += (dx / d) * push;
+        (a as any).y += (dy / d) * push;
+      }
+    }
+  }
+
+  // ----------------------------------------------------------------
+  //   СТРОИТЕЛЬСТВО
+  // ----------------------------------------------------------------
+  canPlace(x: number, y: number, tool: Tool): boolean {
+    if (x < 0 || y < 0 || x >= MAP_WIDTH || y >= MAP_HEIGHT) return false;
+    const t = this.tiles[y][x];
+    const def = BUILDINGS[tool as TileType];
+    if (!def) return false;
+    if (def.size === 2) {
+      if (x % 2 !== 0 || y % 2 !== 0) return false;
+      if (x + 1 >= MAP_WIDTH || y + 1 >= MAP_HEIGHT) return false;
+      const r1 = this.tiles[y][x + 1];
+      const r2 = this.tiles[y + 1][x];
+      const r3 = this.tiles[y + 1][x + 1];
+      return (t.type === 'grass' || t.type === 'road') &&
+             (r1.type === 'grass' || r1.type === 'road') &&
+             (r2.type === 'grass' || r2.type === 'road') &&
+             (r3.type === 'grass' || r3.type === 'road');
+    }
+    return t.type === 'grass' || tool === 'bulldoze';
   }
 
   placeTool(x: number, y: number) {
-    if (this.tool === 'bulldoze') { this.bulldozeTile(x, y); return; }
-    if (this.tool === 'select' || this.tool === 'inspect') { this.selectedTile = { x, y }; return; }
-    this.createBuilding(this.tool, x, y);
+    if (this.stats.money < BUILDINGS[this.tool as TileType].cost) {
+      this.addMessage('Нет денег!', '#ff4444');
+      return;
+    }
+    if (!this.canPlace(x, y, this.tool)) return;
+    const def = BUILDINGS[this.tool as TileType];
+    this.stats.money -= def.cost;
+    if (def.size === 2) {
+      this.tiles[y][x] = { type: this.tool as TileType, level: 1, population: 0, hasFire: false, hasCrime: false, gang: 'none', variant: Math.floor(Math.random() * 4) };
+      this.tiles[y][x + 1] = { type: this.tool as TileType, level: 1, population: 0, hasFire: false, hasCrime: false, gang: 'none', variant: Math.floor(Math.random() * 4) };
+      this.tiles[y + 1][x] = { type: this.tool as TileType, level: 1, population: 0, hasFire: false, hasCrime: false, gang: 'none', variant: Math.floor(Math.random() * 4) };
+      this.tiles[y + 1][x + 1] = { type: this.tool as TileType, level: 1, population: 0, hasFire: false, hasCrime: false, gang: 'none', variant: Math.floor(Math.random() * 4) };
+    } else {
+      this.tiles[y][x] = { type: this.tool as TileType, level: 1, population: 0, hasFire: false, hasCrime: false, gang: 'none', variant: Math.floor(Math.random() * 4) };
+    }
+    this.emitParticles(x * TILE_SIZE, y * TILE_SIZE, '#ffea00', 8);
+    this.addMessage(`Построено: ${def.name}`, '#39ff14');
   }
 
   bulldozeTile(x: number, y: number) {
-    const tile = this.tiles[y]?.[x];
-    if (!tile || tile.type === 'grass' || tile.type === 'water') return;
-    const instance = this.buildings.find(b => b.id === tile.buildingId);
-    if (instance) {
-      this.buildings = this.buildings.filter(b => b.id !== instance.id);
-      for (let oy = 0; oy < instance.size; oy++) for (let ox = 0; ox < instance.size; ox++) this.tiles[instance.y + oy][instance.x + ox] = this.makeTile('grass');
-    } else this.tiles[y][x] = this.makeTile('grass');
+    const t = this.tiles[y][x];
+    if (t.type === 'grass' || t.type === 'water') return;
     this.stats.money += 5;
-    this.roadGraphDirty = true;
-    this.refreshAssignments();
+    this.tiles[y][x] = { type: 'grass', level: 0, population: 0, hasFire: false, hasCrime: false, gang: 'none', variant: 0 };
+    this.emitParticles(x * TILE_SIZE, y * TILE_SIZE, '#888888', 10);
   }
 
-  update(rawDt: number, input: Input) {
+  // ----------------------------------------------------------------
+  //   ГЛАВНЫЙ ЦИКЛ ОБНОВЛЕНИЯ
+  // ----------------------------------------------------------------
+  update(dt: number, input: Input) {
     if (this.paused || this.gameOver) return;
-    const dt = Math.min(50, rawDt) * this.speed;
     this.tickCount++;
-    this.mouseX = input.mouseX; this.mouseY = input.mouseY;
+    // Сохраняем координаты мыши для отрисовки прицела
+    this.mouseX = input.mouseX;
+    this.mouseY = input.mouseY;
     this.updateTime(dt);
-    this.routePlanBudget = this.mode === 'action' ? 2 : 4;
-    this.ensureRoadGraph();
+    this.updateDayNight();
     this.updateCamera(input);
-    if (this.mode === 'action') this.updateAction(input, dt); else this.updateStrategy(input);
+    if (this.mode === 'action') this.updateAction(input, dt);
+    else this.updateStrategy(input);
     this.updateVehicles(dt);
-    if (this.tickCount - this.lastGridTick >= this.npcStride) { this.lastGridTick = this.tickCount; this.rebuildSpatialGrid(); }
     this.updatePedestrians(dt);
     this.updateBullets();
     this.updateExplosions();
@@ -301,761 +496,939 @@ export class Game {
     this.updateParticles();
     this.updateMessages();
     this.updateMissions();
-    if (this.tickCount - this.lastCityTick > 60) { this.lastCityTick = this.tickCount; this.updateCity(); }
-    if (this.tickCount - this.lastAssignmentTick > 360) { this.lastAssignmentTick = this.tickCount; this.refreshAssignments(); }
-    if (this.tickCount - this.lastSaveTick > 300) { this.lastSaveTick = this.tickCount; this.saveGame(true); }
-    this.maybeSpawnIncident();
-    this.maybeGangActivity();
+    this.updateCity(dt);
+    this.checkCollisions();
+    this.maybeSpawnCrime();
+    this.maybeSpawnFire();
+    this.maybePolicePatrol();
+    this.maybePublicTransport();
+    this.maybeGangWar();
+    this.maybeSpawnBoss();
     if (this.shootingCooldown > 0) this.shootingCooldown--;
-    if (this.superWeaponTimer > 0 && --this.superWeaponTimer === 0) this.superWeapon = false;
-    this.dayNightCycle = this.stats.hour / 24 + this.stats.minute / 1440;
+    if (this.superWeaponTimer > 0) { this.superWeaponTimer--; if (this.superWeaponTimer === 0) this.superWeapon = false; }
   }
 
-  private updateTime(dt: number) {
+  // ----------------------------------------------------------------
+  //   ЭКОНОМИКА — НАЛОГИ КАЖДЫЙ ЧАС
+  // ----------------------------------------------------------------
+  updateTime(dt: number) {
     this.timeAccumulator += dt;
-    while (this.timeAccumulator >= 1000) {
+    if (this.timeAccumulator >= 1000) {
       this.timeAccumulator -= 1000;
       this.stats.minute++;
       if (this.stats.minute >= 60) {
         this.stats.minute = 0;
-        this.stats.hour = (this.stats.hour + 1) % 24;
-        if (this.stats.hour === 0) this.stats.day++;
+        this.stats.hour++;
+        if (this.stats.hour >= 24) {
+          this.stats.hour = 0;
+          this.stats.day++;
+        }
+        // Каждый игровой час собираем налоги
         this.collectHourlyTaxes();
       }
     }
   }
 
-  private collectHourlyTaxes() {
-    let income = 0; let expenses = 0;
-    for (const b of this.buildings) {
-      const def = BUILDINGS[b.type];
-      let multiplier = 1;
-      if (b.type === 'residential') multiplier = this.taxRateResidential / 100;
-      if (b.type === 'commercial') multiplier = this.taxRateCommercial / 100;
-      if (b.type === 'industrial') multiplier = this.taxRateIndustrial / 100;
-      const tile = this.tiles[b.y][b.x];
-      const demand = b.type === 'residential' || b.type === 'commercial' || b.type === 'industrial' ? this.stats.zoneDemand[b.type] : 100;
-      const demandMultiplier = 0.55 + demand / 100 * 0.65;
-      const powerMultiplier = tile.powered === false ? 0.35 : 1;
-      income += Math.round(def.income * multiplier * this.taxMultiplier * demandMultiplier * powerMultiplier * (tile.hasCrime ? 0.65 : 1));
-      expenses += def.upkeep;
+  updateDayNight() {
+    this.dayNightCycle = this.stats.hour / 24 + this.stats.minute / (24 * 60);
+  }
+
+  collectHourlyTaxes() {
+    let income = 0;
+    let expenses = 0;
+    // Сборы по зонам
+    for (let y = 0; y < MAP_HEIGHT; y++) {
+      for (let x = 0; x < MAP_WIDTH; x++) {
+        const t = this.tiles[y][x];
+        if (t.level > 0) {
+          const def = BUILDINGS[t.type];
+          const levelBonus = 1 + (t.level - 1) * 0.25;
+          let zoneMultiplier = 1;
+          if (t.type === 'residential') zoneMultiplier = this.taxRateResidential / 100;
+          else if (t.type === 'commercial') zoneMultiplier = this.taxRateCommercial / 100;
+          else if (t.type === 'industrial') zoneMultiplier = this.taxRateIndustrial / 100;
+          const baseIncome = def.income * this.taxMultiplier * levelBonus * zoneMultiplier;
+          const penalty = (t.hasCrime ? 0.5 : 1) * (t.hasFire ? 0.3 : 1);
+          income += Math.round(baseIncome * penalty);
+          expenses += def.upkeep;
+        }
+      }
     }
-    income += Math.round(this.deposit * this.bankInterestRate / 100);
-    expenses += Math.round(this.loanAmount * this.loanInterestRate / 100);
-    this.stats.income = income; this.stats.expenses = expenses;
+    // Проценты по депозиту
+    const depositInterest = Math.round(this.deposit * (this.bankInterestRate / 100));
+    income += depositInterest;
+    // Проценты по кредиту
+    const loanInterest = Math.round(this.loanAmount * (this.loanInterestRate / 100));
+    expenses += loanInterest;
+
+    this.stats.income = income;
+    this.stats.expenses = expenses;
     const net = income - expenses;
-    this.stats.money += net; this.totalEarned += Math.max(0, net);
-    this.addMessage(`Поток бюджета: ${net >= 0 ? '+' : ''}$${net}`, net >= 0 ? '#69d9c8' : '#f47067');
+    this.stats.money += net;
+    this.totalEarned += Math.max(0, net);
+    if (this.tickCount % 60 === 0) {
+      this.addMessage(
+        `Час ${this.stats.hour}: ${net >= 0 ? '+' : ''}$${net}`,
+        net >= 0 ? '#39ff14' : '#ff4444',
+      );
+    }
   }
 
-  private updateStrategy(input: Input) {
-    const pointer = this.screenToWorld(input.mouseX, input.mouseY);
-    let tx = Math.floor(pointer.x / TILE_SIZE);
-    let ty = Math.floor(pointer.y / TILE_SIZE);
-    const def = this.tool in BUILDINGS ? BUILDINGS[this.tool as TileType] : undefined;
-    if (def?.size === 2) { tx -= tx % 2; ty -= ty % 2; }
-    this.hoveredTile = { x: tx, y: ty };
-    if (tx < 0 || ty < 0 || tx >= MAP_WIDTH || ty >= MAP_HEIGHT) return;
-    if (input.mouseDown) { this.placeTool(tx, ty); input.mouseDown = false; }
-    if (input.rightDown) { this.selectedTile = { x: tx, y: ty }; this.tool = 'inspect'; input.rightDown = false; }
+  /** Внести деньги на депозит в банк */
+  depositToBank(amount: number): boolean {
+    if (amount <= 0 || this.stats.money < amount) return false;
+    this.stats.money -= amount;
+    this.deposit += amount;
+    this.addMessage(`+Депозит: +$${amount}`, '#00f0ff');
+    return true;
   }
 
-  private updateAction(input: Input, _dt: number) {
-    const right = input.keys.KeyD === true || input.keys.ArrowRight === true;
-    const left = input.keys.KeyA === true || input.keys.ArrowLeft === true;
-    const down = input.keys.KeyS === true || input.keys.ArrowDown === true;
-    const up = input.keys.KeyW === true || input.keys.ArrowUp === true;
-    let dx = Number(right) - Number(left);
-    let dy = Number(down) - Number(up);
-    if (!dx && !dy && this.autopilot && this.autopilotTarget) {
-      const waypoint = this.autopilotPath[0];
-      if (!waypoint) { this.addMessage(`Автопилот прибыл: ${this.autopilotTarget.label}`, '#69d9c8'); this.autopilot = false; this.autopilotTarget = null; }
-      else {
-        const deltaX = waypoint.x - this.player.x; const deltaY = waypoint.y - this.player.y; const dist = Math.hypot(deltaX, deltaY);
-        if (dist < 11) this.autopilotPath.shift();
-        else { dx = deltaX / dist; dy = deltaY / dist; }
-      }
-    } else if (dx || dy) { this.autopilot = false; this.autopilotPath = []; }
-    if (dx || dy) { const length = Math.hypot(dx, dy); dx /= length; dy /= length; }
-    const vehicle = this.playerInVehicleId === null ? undefined : this.vehicles.find(v => v.id === this.playerInVehicleId);
-    if (vehicle) {
-      const speed = 2.2;
-      const nx = vehicle.x + dx * speed; const ny = vehicle.y + dy * speed;
-      if (this.isRoadPosition(nx, vehicle.y)) vehicle.x = nx;
-      if (this.isRoadPosition(vehicle.x, ny)) vehicle.y = ny;
-      vehicle.angle = Math.atan2(dy || Math.sin(vehicle.angle), dx || Math.cos(vehicle.angle));
-      vehicle.speed = Math.hypot(dx, dy) * speed;
-      this.player.x = vehicle.x; this.player.y = vehicle.y;
+  /** Снять деньги с депозита */
+  withdrawFromBank(amount: number): boolean {
+    if (amount <= 0 || this.deposit < amount) return false;
+    this.deposit -= amount;
+    this.stats.money += amount;
+    this.addMessage(`-Снятие: +$${amount}`, '#ffea00');
+    return true;
+  }
+
+  /** Взять кредит в банке */
+  takeLoan(amount: number): boolean {
+    const maxLoan = Math.max(1000, this.deposit * 3 + this.stats.income * 24);
+    if (amount <= 0 || amount > maxLoan) return false;
+    this.stats.money += amount;
+    this.loanAmount += amount;
+    this.addMessage(`Кредит: +$${amount}`, '#ff8c00');
+    return true;
+  }
+
+  /** Погасить кредит */
+  repayLoan(amount: number): boolean {
+    if (amount <= 0 || this.stats.money < amount) return false;
+    const toRepay = Math.min(amount, this.loanAmount);
+    this.stats.money -= toRepay;
+    this.loanAmount -= toRepay;
+    this.addMessage(`Погашение кредита: -$${toRepay}`, '#39ff14');
+    return true;
+  }
+
+  // ----------------------------------------------------------------
+  //   КАМЕРА
+  // ----------------------------------------------------------------
+  updateCamera(input: Input) {
+    if (this.mode === 'strategy') {
+      const cs = 8;
+      if (input.keys['ArrowLeft'] || input.keys['KeyA']) this.camera.x -= cs;
+      if (input.keys['ArrowRight'] || input.keys['KeyD']) this.camera.x += cs;
+      if (input.keys['ArrowUp'] || input.keys['KeyW']) this.camera.y -= cs;
+      if (input.keys['ArrowDown'] || input.keys['KeyS']) this.camera.y += cs;
     } else {
-      const speed = 2.1; const nx = this.player.x + dx * speed; const ny = this.player.y + dy * speed;
-      if (!this.isBlocked(nx, this.player.y)) this.player.x = nx;
-      if (!this.isBlocked(this.player.x, ny)) this.player.y = ny;
-      this.player.speed = Math.hypot(dx, dy) * speed;
+      this.camera.x = this.player.x - this.viewportWidth / (2 * this.camera.zoom);
+      this.camera.y = this.player.y - this.viewportHeight / (2 * this.camera.zoom);
     }
-    const aim = this.screenToWorld(input.mouseX, input.mouseY);
-    this.player.angle = Math.atan2(aim.y - this.player.y, aim.x - this.player.x);
-    if (input.mouseDown && this.shootingCooldown === 0) this.shoot();
-    if (input.keys.KeyF) { this.toggleVehicle(); input.keys.KeyF = false; }
-    this.player.x = Math.max(TILE_SIZE, Math.min(MAP_WIDTH * TILE_SIZE - TILE_SIZE, this.player.x));
-    this.player.y = Math.max(TILE_SIZE, Math.min(MAP_HEIGHT * TILE_SIZE - TILE_SIZE, this.player.y));
-  }
-
-  private toggleVehicle() {
-    if (this.playerInVehicleId === null) {
-      const near = this.vehicles.find(v => Math.hypot(v.x - this.player.x, v.y - this.player.y) < 28);
-      if (!near) return;
-      near.driver = 'player'; this.playerInVehicleId = near.id; this.player.inVehicle = true; this.addMessage('Транспорт под контролем', '#31d7c8');
-    } else {
-      const vehicle = this.vehicles.find(v => v.id === this.playerInVehicleId);
-      if (vehicle) vehicle.driver = 'civilian';
-      this.playerInVehicleId = null; this.player.inVehicle = false;
-    }
-  }
-
-  private shoot() {
-    if (this.player.ammo <= 0) { this.addMessage('Боезапас исчерпан', '#f47067'); this.shootingCooldown = 20; return; }
-    this.player.ammo--; this.shootingCooldown = this.superWeapon ? 3 : 12;
-    this.bullets.push({ id: uid(), x: this.player.x, y: this.player.y, vx: Math.cos(this.player.angle) * (this.superWeapon ? 11 : 8), vy: Math.sin(this.player.angle) * (this.superWeapon ? 11 : 8), damage: this.superWeapon ? 75 : 25, owner: 'player', life: 60 });
-  }
-
-  private rebuildSpatialGrid() {
-    this.spatialGrid.clear();
-    for (const ped of this.pedestrians) {
-      if (ped.state === 'dead') continue;
-      const key = this.cellKey(ped.x, ped.y);
-      const list = this.spatialGrid.get(key); if (list) list.push(ped); else this.spatialGrid.set(key, [ped]);
-    }
-  }
-
-  private cellKey(x: number, y: number) { return `${Math.floor(x / 96)}:${Math.floor(y / 96)}`; }
-  private nearbyPeds(x: number, y: number) {
-    const cx = Math.floor(x / 96), cy = Math.floor(y / 96); const result: Pedestrian[] = [];
-    for (let oy = -1; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++) result.push(...(this.spatialGrid.get(`${cx + ox}:${cy + oy}`) ?? []));
-    return result;
-  }
-
-  private updatePedestrians(_dt: number) {
-    const slice = this.tickCount % this.npcStride;
-    for (let i = 0; i < this.pedestrians.length; i++) {
-      const ped = this.pedestrians[i];
-      if (ped.state === 'dead' || i % this.npcStride !== slice) continue;
-      if (ped.weaponCooldown > 0) ped.weaponCooldown -= this.npcStride;
-      if (this.tickCount >= ped.decisionTick) this.decideNpc(ped);
-      this.movePedestrian(ped, this.npcStride);
-      this.resolveSocialMoment(ped);
-    }
-  }
-
-  private decideNpc(ped: Pedestrian) {
-    ped.decisionTick = this.tickCount + 60 + Math.floor(Math.random() * 45);
-    if (ped.type === 'enforcer') { this.decideGangNpc(ped); return; }
-    if (ped.type === 'officer') { this.decideOfficer(ped); return; }
-    if (ped.type === 'firefighter') { this.decideFirefighter(ped); return; }
-    if (ped.type === 'medic') { this.decideMedic(ped); return; }
-    const workingHours = this.stats.hour >= 8 && this.stats.hour < 18;
-    const socialHours = this.stats.hour >= 18 && this.stats.hour < 22;
-    const home = this.getBuildingById(ped.homeBuildingId);
-    const work = this.getBuildingById(ped.workBuildingId) ?? this.findWorkplace(ped.profession);
-    const social = this.getNearestBuilding(ped.x, ped.y, ['park', 'commercial', 'stadium']);
-    const destination = workingHours ? work : socialHours && social ? social : home ?? social ?? work;
-    if (destination) {
-      ped.targetX = (destination.x + destination.size / 2) * TILE_SIZE;
-      ped.targetY = (destination.y + destination.size / 2) * TILE_SIZE;
-      ped.intent = socialHours && destination === social ? 'social' : workingHours && destination === work ? 'work' : destination === home ? 'home' : 'work';
-      ped.state = socialHours && destination === social ? 'socializing' : workingHours && destination === work ? 'working' : 'walking';
-    } else {
-      const fallback = this.getNearestBuilding(ped.x, ped.y, ['park', 'commercial', 'residential']);
-      if (fallback) {
-        ped.targetX = (fallback.x + fallback.size / 2) * TILE_SIZE;
-        ped.targetY = (fallback.y + fallback.size / 2) * TILE_SIZE;
-        ped.intent = fallback.type === 'park' || fallback.type === 'commercial' ? 'social' : 'home';
-        ped.state = 'walking';
-      } else {
-        ped.targetX = ped.x; ped.targetY = ped.y; ped.intent = 'home'; ped.state = 'walking';
-      }
-    }
-  }
-
-  private decideGangNpc(ped: Pedestrian) {
-    if ((ped.combatCooldown ?? 0) > 0) ped.combatCooldown = Math.max(0, (ped.combatCooldown ?? 0) - 60);
-    const playerDistance = Math.hypot(this.player.x - ped.x, this.player.y - ped.y);
-    if ((this.player.wanted > 0 || this.playerInVehicleId !== null) && playerDistance < 260) {
-      ped.targetX = this.player.x; ped.targetY = this.player.y; ped.path = undefined; ped.state = 'attacking';
-      if (playerDistance < 180 && ped.weaponCooldown <= 0 && (ped.combatCooldown ?? 0) <= 0) { this.fireNpcBullet(ped, this.player.x, this.player.y, 14); ped.combatCooldown = 180; }
-      return;
-    }
-    const isAggressor = ped.id % 3 === 0;
-    const rival = isAggressor ? this.nearbyPeds(ped.x, ped.y).find(other => other.type === 'enforcer' && other.gang !== ped.gang && other.gang !== 'none' && Math.hypot(other.x - ped.x, other.y - ped.y) < 120) : undefined;
-    if (rival) {
-      ped.targetX = rival.x; ped.targetY = rival.y; ped.path = undefined; ped.state = 'attacking';
-      if (ped.weaponCooldown <= 0 && (ped.combatCooldown ?? 0) <= 0) { this.fireNpcBullet(ped, rival.x, rival.y, 12); ped.combatCooldown = 180; }
-      return;
-    }
-    const territory = this.findGangTile(ped.gang);
-    ped.targetX = (territory.x + ((ped.id % 5) - 2) * 2) * TILE_SIZE; ped.targetY = (territory.y + ((Math.floor(ped.id / 5) % 5) - 2) * 2) * TILE_SIZE; ped.path = undefined; ped.state = 'walking';
-  }
-
-  private decideOfficer(ped: Pedestrian) {
-    const incident = this.findNearestIncident(ped.x, ped.y);
-    if (this.player.wanted > 0 && Math.hypot(this.player.x - ped.x, this.player.y - ped.y) < 330) { ped.targetX = this.player.x; ped.targetY = this.player.y; ped.state = 'responding'; if (ped.weaponCooldown <= 0) this.fireNpcBullet(ped, this.player.x, this.player.y, 9); return; }
-    if (incident) { ped.targetX = incident.x * TILE_SIZE; ped.targetY = incident.y * TILE_SIZE; ped.state = 'responding'; if (incident.distance < 24) this.tiles[incident.y][incident.x].hasCrime = false; return; }
-    this.setNpcToWork(ped);
-  }
-
-  private decideFirefighter(ped: Pedestrian) {
-    const incident = this.findNearestIncident(ped.x, ped.y, 'fire');
-    if (incident) { ped.targetX = incident.x * TILE_SIZE; ped.targetY = incident.y * TILE_SIZE; ped.state = 'responding'; if (incident.distance < 24) this.tiles[incident.y][incident.x].hasFire = false; return; }
-    this.setNpcToWork(ped);
-  }
-
-  private decideMedic(ped: Pedestrian) {
-    const patient = this.nearbyPeds(ped.x, ped.y).find(other => other !== ped && other.health < 35 && other.state !== 'dead');
-    if (patient) { ped.targetX = patient.x; ped.targetY = patient.y; ped.state = 'responding'; if (Math.hypot(patient.x - ped.x, patient.y - ped.y) < 20) patient.health = Math.min(70, patient.health + 18); return; }
-    this.setNpcToWork(ped);
-  }
-
-  private setNpcToWork(ped: Pedestrian) {
-    const work = this.getBuildingById(ped.workBuildingId) ?? this.findWorkplace(ped.profession);
-    if (!work) { ped.state = 'walking'; return; }
-    ped.targetX = (work.x + work.size / 2) * TILE_SIZE; ped.targetY = (work.y + work.size / 2) * TILE_SIZE; ped.intent = 'work'; ped.state = 'working';
-  }
-
-  private movePedestrian(ped: Pedestrian, factor: number) {
-    let dx = Math.cos(ped.angle), dy = Math.sin(ped.angle);
-    if (ped.targetX !== undefined && ped.targetY !== undefined) {
-      const useRoadPath = ped.type !== 'enforcer';
-      if (useRoadPath && !ped.path?.length && this.tickCount >= (ped.pathRetryTick ?? 0) && this.routePlanBudget > 0) {
-        this.routePlanBudget--;
-        ped.path = this.findRoadPath(ped.x, ped.y, ped.targetX, ped.targetY);
-        ped.pathRetryTick = this.tickCount + 12;
-      }
-      const waypoint = ped.path?.[0];
-      const tx = (waypoint?.x ?? ped.targetX) - ped.x, ty = (waypoint?.y ?? ped.targetY) - ped.y, distance = Math.hypot(tx, ty);
-      if (distance > 8) { dx = tx / distance; dy = ty / distance; ped.angle = Math.atan2(dy, dx); if (waypoint && distance < 12) ped.path?.shift(); }
-      else { ped.targetX = undefined; ped.targetY = undefined; ped.path = undefined; if (ped.state === 'socializing') ped.socialMeter = Math.min(100, ped.socialMeter + 8); }
-    }
-    let avoidX = 0, avoidY = 0;
-    for (const other of this.nearbyPeds(ped.x, ped.y)) {
-      if (other === ped || other.state === 'dead') continue;
-      const ox = ped.x - other.x, oy = ped.y - other.y, distance = Math.hypot(ox, oy);
-      if (distance > 0 && distance < 18) { const force = (18 - distance) / 18; avoidX += ox / distance * force; avoidY += oy / distance * force; }
-    }
-    for (const vehicle of this.vehicles) {
-      const ox = ped.x - vehicle.x, oy = ped.y - vehicle.y, distance = Math.hypot(ox, oy);
-      if (distance > 0 && distance < 22) { const force = (22 - distance) / 22; avoidX += ox / distance * force * 1.4; avoidY += oy / distance * force * 1.4; }
-    }
-    if (avoidX || avoidY) { dx += avoidX * 0.9; dy += avoidY * 0.9; const length = Math.hypot(dx, dy) || 1; dx /= length; dy /= length; }
-    const speed = ped.type === 'enforcer' || ped.type === 'officer' ? 1.05 : 0.68;
-    const nx = ped.x + dx * speed * factor, ny = ped.y + dy * speed * factor;
-    if (!this.isBlocked(nx, ped.y, 3)) ped.x = nx;
-    if (!this.isBlocked(ped.x, ny, 3)) ped.y = ny;
-    ped.x = Math.max(8, Math.min(MAP_WIDTH * TILE_SIZE - 8, ped.x)); ped.y = Math.max(8, Math.min(MAP_HEIGHT * TILE_SIZE - 8, ped.y));
-  }
-
-  private resolveSocialMoment(ped: Pedestrian) {
-    if (ped.type !== 'civilian') return;
-    const neighbour = this.nearbyPeds(ped.x, ped.y).find(other => other !== ped && other.type === 'civilian' && other.state !== 'dead' && Math.hypot(other.x - ped.x, other.y - ped.y) < 18);
-    if (!neighbour) { ped.socialMeter = Math.max(0, ped.socialMeter - 0.05); return; }
-    const sharedWork = ped.profession === neighbour.profession;
-    const boost = sharedWork ? 0.22 : 0.12;
-    ped.socialMeter = Math.min(100, ped.socialMeter + boost);
-    neighbour.socialMeter = Math.min(100, neighbour.socialMeter + boost * 0.5);
-    ped.mood = Math.min(100, ped.mood + boost * 0.3);
-  }
-
-  private roadKey(x: number, y: number) { return `${x}:${y}`; }
-
-  private ensureRoadGraph() {
-    if (!this.roadGraphDirty) return;
-    this.roadGraph.clear();
-    for (let y = 0; y < MAP_HEIGHT; y++) for (let x = 0; x < MAP_WIDTH; x++) {
-      if (!this.isRoadTile(x, y)) continue;
-      const neighbors = [{ x: x + 1, y }, { x: x - 1, y }, { x, y: y + 1 }, { x, y: y - 1 }]
-        .filter(point => this.isRoadTile(point.x, point.y))
-        .map(point => ({ ...point, cost: 1 }));
-      this.roadGraph.set(this.roadKey(x, y), { x, y, neighbors });
-    }
-    this.roadGraphDirty = false;
-  }
-
-  private ensureTransitGraph() {
-    if (!this.transitGraphDirty) return;
-    this.tramGraph.clear(); this.railGraph.clear();
-    const build = (target: Map<string, { x: number; y: number; neighbors: { x: number; y: number; cost: number }[] }>, type: 'tramrail' | 'rail') => {
-      for (let y = 0; y < MAP_HEIGHT; y++) for (let x = 0; x < MAP_WIDTH; x++) {
-        if (this.tiles[y][x].type !== type) continue;
-        const neighbors = [{ x: x + 1, y }, { x: x - 1, y }, { x, y: y + 1 }, { x, y: y - 1 }]
-          .filter(point => point.x >= 0 && point.y >= 0 && point.x < MAP_WIDTH && point.y < MAP_HEIGHT && this.tiles[point.y][point.x].type === type)
-          .map(point => ({ ...point, cost: 1 }));
-        target.set(this.roadKey(x, y), { x, y, neighbors });
-      }
-    };
-    build(this.tramGraph, 'tramrail'); build(this.railGraph, 'rail'); this.transitGraphDirty = false;
-  }
-
-  private findTransitPath(startWorldX: number, startWorldY: number, endWorldX: number, endWorldY: number, kind: 'tram' | 'train') {
-    this.ensureTransitGraph();
-    const graph = kind === 'tram' ? this.tramGraph : this.railGraph;
-    const type = kind === 'tram' ? 'tramrail' : 'rail';
-    const nearest = (worldX: number, worldY: number) => {
-      const sx = Math.floor(worldX / TILE_SIZE), sy = Math.floor(worldY / TILE_SIZE); let best: { x: number; y: number; d: number } | undefined;
-      for (const node of graph.values()) { const d = Math.hypot(node.x - sx, node.y - sy); if (!best || d < best.d) best = { x: node.x, y: node.y, d }; }
-      return best ? { x: best.x, y: best.y } : null;
-    };
-    const start = nearest(startWorldX, startWorldY), goal = nearest(endWorldX, endWorldY);
-    if (!start || !goal) return [];
-    const startKey = this.roadKey(start.x, start.y), goalKey = this.roadKey(goal.x, goal.y);
-    const open = [startKey], cameFrom = new Map<string, string>(), score = new Map<string, number>([[startKey, 0]]), estimate = new Map<string, number>([[startKey, Math.hypot(goal.x - start.x, goal.y - start.y)]]);
-    while (open.length) {
-      open.sort((a, b) => (estimate.get(a) ?? Infinity) - (estimate.get(b) ?? Infinity)); const current = open.shift()!;
-      if (current === goalKey) { const keys = [current]; while (cameFrom.has(keys[0])) keys.unshift(cameFrom.get(keys[0])!); return keys.slice(1).map(key => { const [x, y] = key.split(':').map(Number); return { x: x * TILE_SIZE + TILE_SIZE / 2, y: y * TILE_SIZE + TILE_SIZE / 2 }; }); }
-      const node = graph.get(current); if (!node) continue;
-      for (const neighbor of node.neighbors) { const key = this.roadKey(neighbor.x, neighbor.y), next = (score.get(current) ?? Infinity) + neighbor.cost; if (next < (score.get(key) ?? Infinity)) { cameFrom.set(key, current); score.set(key, next); estimate.set(key, next + Math.hypot(goal.x - neighbor.x, goal.y - neighbor.y)); if (!open.includes(key)) open.push(key); } }
-    }
-    return [];
-  }
-
-  private nearestTransitPosition(worldX: number, worldY: number, kind: 'tram' | 'train') {
-    this.ensureTransitGraph(); const graph = kind === 'tram' ? this.tramGraph : this.railGraph; let best: { x: number; y: number; d: number } | undefined;
-    for (const node of graph.values()) { const d = Math.hypot(node.x * TILE_SIZE - worldX, node.y * TILE_SIZE - worldY); if (!best || d < best.d) best = { x: node.x, y: node.y, d }; }
-    return best ? { x: best.x * TILE_SIZE + TILE_SIZE / 2, y: best.y * TILE_SIZE + TILE_SIZE / 2, angle: 0 } : null;
-  }
-
-  private nearestRoadTile(worldX: number, worldY: number) {
-    const sx = Math.floor(worldX / TILE_SIZE), sy = Math.floor(worldY / TILE_SIZE);
-    let best: { x: number; y: number; distance: number } | null = null;
-    for (let radius = 0; radius < 48; radius++) {
-      for (let y = sy - radius; y <= sy + radius; y++) for (let x = sx - radius; x <= sx + radius; x++) {
-        if (!this.isRoadTile(x, y)) continue;
-        const distance = Math.hypot(x - sx, y - sy);
-        if (!best || distance < best.distance) best = { x, y, distance };
-      }
-      const candidate = best as { x: number; y: number; distance: number } | null;
-      if (candidate) return { x: candidate.x, y: candidate.y };
-    }
-    return null;
-  }
-
-  findRoadPath(startWorldX: number, startWorldY: number, endWorldX: number, endWorldY: number) {
-    this.ensureRoadGraph();
-    const start = this.nearestRoadTile(startWorldX, startWorldY), goal = this.nearestRoadTile(endWorldX, endWorldY);
-    if (!start || !goal) return [];
-    const startKey = this.roadKey(start.x, start.y), goalKey = this.roadKey(goal.x, goal.y);
-    const open = [startKey], cameFrom = new Map<string, string>(), gScore = new Map<string, number>([[startKey, 0]]), fScore = new Map<string, number>([[startKey, Math.hypot(goal.x - start.x, goal.y - start.y)]]);
-    while (open.length) {
-      open.sort((a, b) => (fScore.get(a) ?? Infinity) - (fScore.get(b) ?? Infinity));
-      const current = open.shift()!;
-      if (current === goalKey) {
-        const keys: string[] = [current];
-        while (cameFrom.has(keys[0])) keys.unshift(cameFrom.get(keys[0])!);
-        return keys.slice(1).map(key => { const [x, y] = key.split(':').map(Number); return { x: x * TILE_SIZE + TILE_SIZE / 2, y: y * TILE_SIZE + TILE_SIZE / 2 }; });
-      }
-      const node = this.roadGraph.get(current); if (!node) continue;
-      for (const neighbor of node.neighbors) {
-        const key = this.roadKey(neighbor.x, neighbor.y), tentative = (gScore.get(current) ?? Infinity) + neighbor.cost;
-        if (tentative < (gScore.get(key) ?? Infinity)) {
-          cameFrom.set(key, current); gScore.set(key, tentative); fScore.set(key, tentative + Math.hypot(goal.x - neighbor.x, goal.y - neighbor.y));
-          if (!open.includes(key)) open.push(key);
-        }
-      }
-    }
-    return [];
-  }
-
-  private nextRoadDestination(worldX: number, worldY: number) {
-    const target = this.getRandomRoadPosition();
-    return this.findRoadPath(worldX, worldY, target.x, target.y);
-  }
-
-  private nextVehicleDestination(vehicle: Vehicle) {
-    const candidates = vehicle.type === 'gang'
-      ? this.buildings.filter(building => ['commercial', 'industrial', 'casino'].includes(building.type))
-      : this.buildings.filter(building => ['residential', 'commercial', 'industrial', 'park', 'busdepot', 'tramdepot', 'trainstation'].includes(building.type));
-    const occupiedTargets = new Set(this.vehicles.filter(other => other !== vehicle && other.targetX !== undefined && other.targetY !== undefined).map(other => `${Math.round(other.targetX! / TILE_SIZE)}:${Math.round(other.targetY! / TILE_SIZE)}`));
-    let target: typeof candidates[number] | undefined;
-    for (let offset = 0; offset < candidates.length; offset++) {
-      const candidate = candidates[(vehicle.id * 7 + Math.floor(this.tickCount / 180) + offset) % candidates.length];
-      const key = `${candidate.x + candidate.size / 2}:${candidate.y + candidate.size / 2}`;
-      if (!occupiedTargets.has(key)) { target = candidate; break; }
-    }
-    if (!target) target = candidates[(vehicle.id * 7 + Math.floor(this.tickCount / 180)) % candidates.length];
-    if (!target) return this.nextRoadDestination(vehicle.x, vehicle.y);
-    vehicle.targetX = (target.x + target.size / 2) * TILE_SIZE;
-    vehicle.targetY = (target.y + target.size / 2) * TILE_SIZE;
-    return this.findRoadPath(vehicle.x, vehicle.y, vehicle.targetX, vehicle.targetY);
-  }
-
-  private updateVehicles(dt: number) {
-    const frameScale = Math.min(3, Math.max(0.5, dt / 16.67));
-    for (const [key, reservation] of this.junctionReservations) if (reservation.expires <= this.tickCount) this.junctionReservations.delete(key);
-    for (const vehicle of this.vehicles) {
-      if ((vehicle.escapeTicks ?? 0) > 0) vehicle.escapeTicks = Math.max(0, (vehicle.escapeTicks ?? 0) - frameScale);
-      if (vehicle.id === this.playerInVehicleId || vehicle.type === 'airplane') continue;
-      if (vehicle.type === 'tram' || vehicle.type === 'train') {
-        const kind = vehicle.type === 'tram' ? 'tram' : 'train';
-        if (!this.isTransitPosition(vehicle.x, vehicle.y, kind)) { const rail = this.nearestTransitPosition(vehicle.x, vehicle.y, kind); if (!rail) { vehicle.speed = 0; continue; } vehicle.x = rail.x; vehicle.y = rail.y; vehicle.angle = rail.angle; }
-        if (vehicle.stopTimer && vehicle.stopTimer > 0) { vehicle.stopTimer -= frameScale; vehicle.speed = 0; continue; }
-        if (!vehicle.route?.length && this.routePlanBudget > 0) { this.routePlanBudget--; const target = this.buildings.find(building => building.type === (kind === 'tram' ? 'tramdepot' : 'trainstation')); if (target) vehicle.route = this.findTransitPath(vehicle.x, vehicle.y, (target.x + target.size / 2) * TILE_SIZE, (target.y + target.size / 2) * TILE_SIZE, kind); }
-        const transitWaypoint = vehicle.route?.[0]; if (!transitWaypoint) { vehicle.stopTimer = 40; vehicle.speed = 0; continue; }
-        const distance = Math.hypot(transitWaypoint.x - vehicle.x, transitWaypoint.y - vehicle.y);
-        if (distance < 10) { vehicle.route?.shift(); vehicle.stopTimer = vehicle.route?.length ? 0 : 40; continue; }
-        vehicle.angle = Math.atan2(transitWaypoint.y - vehicle.y, transitWaypoint.x - vehicle.x);
-        const transitSpeed = kind === 'tram' ? 0.9 : 1.2; vehicle.vx = Math.cos(vehicle.angle) * transitSpeed; vehicle.vy = Math.sin(vehicle.angle) * transitSpeed;
-        const nx = vehicle.x + vehicle.vx * frameScale, ny = vehicle.y + vehicle.vy * frameScale; if (this.isTransitPosition(nx, ny, kind)) { vehicle.x = nx; vehicle.y = ny; } vehicle.speed = transitSpeed; continue;
-      }
-      if (!this.isRoadPosition(vehicle.x, vehicle.y)) { const road = this.findNearestRoadPosition(vehicle.x, vehicle.y); vehicle.x = road.x; vehicle.y = road.y; vehicle.angle = road.angle; }
-      if (vehicle.stopTimer && vehicle.stopTimer > 0) { vehicle.stopTimer -= frameScale; vehicle.speed = 0; continue; }
-      if ((vehicle.stuckTicks ?? 0) > 24) { vehicle.route = []; vehicle.routeRetryTick = this.tickCount; vehicle.stuckTicks = 0; vehicle.stopTimer = 0; vehicle.escapeTicks = 18; vehicle.angle += vehicle.id % 2 === 0 ? Math.PI / 2 : -Math.PI / 2; }
-      if (!vehicle.route?.length && this.tickCount >= (vehicle.routeRetryTick ?? 0) && this.routePlanBudget > 0) {
-        this.routePlanBudget--;
-        vehicle.route = this.nextVehicleDestination(vehicle);
-        vehicle.routeRetryTick = this.tickCount + 18;
-      }
-      const waypoint = vehicle.route?.[0];
-      let atJunction = false;
-      if (waypoint) {
-        const distance = Math.hypot(waypoint.x - vehicle.x, waypoint.y - vehicle.y);
-        if (distance < 10) {
-          vehicle.route?.shift();
-          if (!vehicle.route?.length) { vehicle.targetX = undefined; vehicle.targetY = undefined; vehicle.stopTimer = vehicle.type === 'taxi' || vehicle.type === 'bus' ? 4 : 2; vehicle.routeRetryTick = this.tickCount + 3; }
-        } else {
-          const desired = Math.atan2(waypoint.y - vehicle.y, waypoint.x - vehicle.x);
-          // Правостороннее движение: в экранных координатах правая сторона — нормаль (-sin, cos).
-          // Встречные машины получают противоположную нормаль из-за обратного направления сегмента.
-          const laneOffset = 3.5;
-          const targetX = waypoint.x - Math.sin(desired) * laneOffset, targetY = waypoint.y + Math.cos(desired) * laneOffset;
-          const steer = Math.atan2(targetY - vehicle.y, targetX - vehicle.x);
-          const delta = Math.atan2(Math.sin(steer - vehicle.angle), Math.cos(steer - vehicle.angle));
-          vehicle.angle += delta * 0.18;
-          const tile = this.nearestRoadTile(vehicle.x, vehicle.y);
-          atJunction = !!tile && (this.roadGraph.get(this.roadKey(tile.x, tile.y))?.neighbors.length ?? 0) >= 3;
-        }
-      }
-      const headOn = this.findHeadOnVehicle(vehicle);
-      if (headOn && vehicle.id > headOn.id && (vehicle.stuckTicks ?? 0) > 4) {
-        const backX = vehicle.x - Math.cos(vehicle.angle) * 8, backY = vehicle.y - Math.sin(vehicle.angle) * 8;
-        if (this.isRoadPosition(backX, backY)) { vehicle.x = backX; vehicle.y = backY; }
-        vehicle.route = []; vehicle.targetX = undefined; vehicle.targetY = undefined; vehicle.routeRetryTick = this.tickCount + 18; vehicle.stuckTicks = 0; vehicle.escapeTicks = 8;
-      }
-      let junctionBlocked = false;
-      const upcomingTile = waypoint ? this.nearestRoadTile(waypoint.x, waypoint.y) : null;
-      if (upcomingTile && (this.roadGraph.get(this.roadKey(upcomingTile.x, upcomingTile.y))?.neighbors.length ?? 0) >= 3 && waypoint && Math.hypot(waypoint.x - vehicle.x, waypoint.y - vehicle.y) < 42) {
-        const junctionKey = this.roadKey(upcomingTile.x, upcomingTile.y);
-        const reservation = this.junctionReservations.get(junctionKey);
-        if (reservation && reservation.vehicleId !== vehicle.id) junctionBlocked = true;
-        else this.junctionReservations.set(junctionKey, { vehicleId: vehicle.id, expires: this.tickCount + 24 });
-      }
-      const rawBlocked = this.hasVehicleAhead(vehicle) || junctionBlocked;
-      const blocked = rawBlocked && (vehicle.escapeTicks ?? 0) <= 0;
-      vehicle.stuckTicks = rawBlocked ? (vehicle.stuckTicks ?? 0) + frameScale : Math.max(0, (vehicle.stuckTicks ?? 0) - frameScale);
-      const cruise = vehicle.type === 'sport' ? 1.5 : vehicle.type === 'gang' ? 1.3 : vehicle.type === 'taxi' ? 1.1 : 1.05;
-      const speed = blocked ? 0 : atJunction ? cruise * 0.48 : cruise;
-      vehicle.vx = Math.cos(vehicle.angle) * speed; vehicle.vy = Math.sin(vehicle.angle) * speed;
-      const nx = vehicle.x + vehicle.vx * frameScale, ny = vehicle.y + vehicle.vy * frameScale;
-      const collisionOnStep = speed > 0 && this.hasVehicleAtPosition(vehicle, nx, ny);
-      if (speed > 0 && !collisionOnStep && this.isRoadPosition(nx, ny)) { vehicle.x = nx; vehicle.y = ny; }
-      vehicle.speed = collisionOnStep ? 0 : speed;
-      const overlap = this.vehicles.find(other => other.id < vehicle.id && other.id !== this.playerInVehicleId && (other.routeKind ?? 'road') === (vehicle.routeKind ?? 'road') && Math.hypot(other.x - vehicle.x, other.y - vehicle.y) < 14);
-      if (overlap) {
-        const candidates = [{ x: vehicle.x + 18, y: vehicle.y }, { x: vehicle.x - 18, y: vehicle.y }, { x: vehicle.x, y: vehicle.y + 18 }, { x: vehicle.x, y: vehicle.y - 18 }, { x: vehicle.x + 12, y: vehicle.y + 12 }, { x: vehicle.x - 12, y: vehicle.y - 12 }];
-        const safe = candidates.find(candidate => this.isRoadPosition(candidate.x, candidate.y) && this.vehicles.filter(other => other !== vehicle && (other.routeKind ?? 'road') === (vehicle.routeKind ?? 'road')).every(other => Math.hypot(other.x - candidate.x, other.y - candidate.y) >= 14));
-        if (safe) { vehicle.x = safe.x; vehicle.y = safe.y; }
-        vehicle.route = []; vehicle.targetX = undefined; vehicle.targetY = undefined; vehicle.routeRetryTick = this.tickCount + 2; vehicle.stopTimer = 0; vehicle.escapeTicks = 8; vehicle.speed = 0;
-      }
-    }
-  }
-
-  private roadDirection(x: number, y: number, current: number) {
-    const tx = Math.floor(x / TILE_SIZE), ty = Math.floor(y / TILE_SIZE);
-    const directions = [{ dx: 1, dy: 0, angle: 0 }, { dx: -1, dy: 0, angle: Math.PI }, { dx: 0, dy: 1, angle: Math.PI / 2 }, { dx: 0, dy: -1, angle: -Math.PI / 2 }].filter(dir => this.isRoadTile(tx + dir.dx, ty + dir.dy));
-    if (!directions.length) return { angle: current };
-    const forward = directions.find(dir => Math.abs(Math.atan2(Math.sin(dir.angle - current), Math.cos(dir.angle - current))) < 0.2);
-    return forward && Math.random() < 0.82 ? forward : directions[Math.floor(Math.random() * directions.length)];
-  }
-
-  private turnAngle(angle: number) { return angle + (Math.random() < 0.5 ? Math.PI / 2 : -Math.PI / 2); }
-  private hasVehicleAtPosition(vehicle: Vehicle, x: number, y: number) {
-    return this.vehicles.some(other => {
-      if (other === vehicle || other.id === this.playerInVehicleId || (other.routeKind ?? 'road') !== (vehicle.routeKind ?? 'road')) return false;
-      return Math.hypot(other.x - x, other.y - y) < 18;
-    });
-  }
-
-  private findHeadOnVehicle(vehicle: Vehicle) {
-    return this.vehicles.find(other => {
-      if (other === vehicle || other.id === this.playerInVehicleId || (other.routeKind ?? 'road') !== (vehicle.routeKind ?? 'road')) return false;
-      const dx = other.x - vehicle.x, dy = other.y - vehicle.y;
-      const distance = Math.hypot(dx, dy);
-      const relativeHeading = Math.abs(Math.atan2(Math.sin(vehicle.angle - other.angle), Math.cos(vehicle.angle - other.angle)));
-      return distance < 22 && relativeHeading > 0.95;
-    });
-  }
-
-  private hasVehicleAhead(vehicle: Vehicle) { return this.vehicles.some(other => {
-    if (other === vehicle || other.id === this.playerInVehicleId) return false;
-    const sameNetwork = (other.routeKind ?? 'road') === (vehicle.routeKind ?? 'road'); if (!sameNetwork) return false;
-    const dx = other.x - vehicle.x, dy = other.y - vehicle.y, distance = Math.hypot(dx, dy);
-    const relativeHeading = Math.abs(Math.atan2(Math.sin(vehicle.angle - other.angle), Math.cos(vehicle.angle - other.angle)));
-    const forward = dx * Math.cos(vehicle.angle) + dy * Math.sin(vehicle.angle);
-    if (distance < 22) return relativeHeading > 0.95 || forward > 0;
-    const lateral = Math.abs(-dx * Math.sin(vehicle.angle) + dy * Math.cos(vehicle.angle));
-    return forward > 0 && forward < 30 && lateral < 7;
-  }); }
-
-  private updateBullets() {
-    for (const bullet of this.bullets) { bullet.x += bullet.vx; bullet.y += bullet.vy; bullet.life--; }
-    for (const bullet of this.bullets) {
-      for (const ped of this.pedestrians) {
-        if (ped.state === 'dead' || Math.hypot(ped.x - bullet.x, ped.y - bullet.y) > 8) continue;
-        if (bullet.owner === 'gang' && ped.type === 'enforcer' && ped.gang !== 'none') continue;
-        ped.health -= bullet.damage; bullet.life = 0;
-        if (ped.health <= 0) { ped.state = 'dead'; if (bullet.owner === 'player') { this.totalKills++; this.player.wanted = Math.min(5, this.player.wanted + (ped.type === 'enforcer' ? 1 : 0)); this.pickups.push({ id: uid(), x: ped.x, y: ped.y, type: 'money', amount: 25, life: 500 }); } }
-        break;
-      }
-      if (bullet.owner !== 'player' && Math.hypot(this.player.x - bullet.x, this.player.y - bullet.y) < 8) { this.player.health -= bullet.damage; bullet.life = 0; if (this.player.health <= 0) this.playerDeath(); }
-    }
-    this.bullets = this.bullets.filter(b => b.life > 0 && b.x > 0 && b.x < MAP_WIDTH * TILE_SIZE && b.y > 0 && b.y < MAP_HEIGHT * TILE_SIZE);
-  }
-
-  private updateExplosions() { for (const e of this.explosions) { e.life--; e.radius = e.maxRadius * (1 - e.life / e.maxLife); } this.explosions = this.explosions.filter(e => e.life > 0); }
-  private updatePickups() { for (const p of this.pickups) { p.life--; if (Math.hypot(p.x - this.player.x, p.y - this.player.y) < 20) { if (p.type === 'money') { this.stats.money += p.amount; this.player.money += p.amount; } if (p.type === 'ammo') this.player.ammo = Math.min(this.player.maxAmmo, this.player.ammo + p.amount); p.life = 0; } } this.pickups = this.pickups.filter(p => p.life > 0); }
-  private updateParticles() { for (const p of this.particles) { p.x += p.vx; p.y += p.vy; p.life--; } this.particles = this.particles.filter(p => p.life > 0); }
-  private updateMessages() { for (const m of this.messages) { m.life--; m.y -= 0.5; } this.messages = this.messages.filter(m => m.life > 0); }
-
-  private updateMissions() {
-    for (const mission of this.missions) {
-      if (mission.completed) continue;
-      if (mission.type === 'kill') mission.progress = Math.min(mission.target, this.totalKills);
-      if (mission.type === 'collect') mission.progress = Math.min(mission.target, this.totalEarned);
-      if (mission.type === 'social') mission.progress = Math.floor(this.stats.community);
-      if (mission.progress >= mission.target) { mission.completed = true; this.stats.money += mission.reward; this.addMessage(`Миссия: ${mission.title} +$${mission.reward}`, '#f4cf68'); }
-    }
-  }
-
-  private updateCity() {
-    let population = 0, socialValue = 0, jobs = 0, crimeTiles = 0;
-    for (const building of this.buildings) {
-      const def = BUILDINGS[building.type], tile = this.tiles[building.y][building.x];
-      if (building.type === 'residential') { tile.population = Math.min(def.population, tile.population + 4); population += tile.population; }
-      socialValue += def.socialValue; jobs += def.workSlots;
-      if (tile.hasCrime) crimeTiles++;
-    }
-    this.updateEnergyNetwork();
-    this.updateZoneDemand(population, jobs, socialValue);
-    const civilians = this.pedestrians.filter(p => p.type === 'civilian' && p.state !== 'dead');
-    const averageSocial = civilians.length ? civilians.reduce((sum, p) => sum + p.socialMeter, 0) / civilians.length : 0;
-    const activeWorkers = civilians.filter(p => p.workBuildingId !== undefined).length;
-    const communityTarget = Math.min(100, 22 + socialValue * 1.7 + averageSocial * 0.35 - crimeTiles * 4);
-    this.stats.community += (communityTarget - this.stats.community) * 0.08;
-    this.stats.population = population;
-    this.stats.activeWorkers = activeWorkers;
-    this.stats.employment = jobs ? Math.min(100, Math.round(activeWorkers / jobs * 100)) : 0;
-    this.stats.crime = Math.min(100, crimeTiles * 8 + GANG_IDS.reduce((sum, gang) => sum + this.pedestrians.filter(p => p.gang === gang && p.state !== 'dead').length, 0) * 0.25);
-    const taxPressure = (this.taxRateResidential + this.taxRateCommercial + this.taxRateIndustrial) / 300 - 1;
-    const approvalTarget = Math.max(0, Math.min(100, 38 + this.stats.community * 0.55 + this.stats.employment * 0.2 - this.stats.crime * 0.4 - taxPressure * 18 - (this.stats.energy.outage ? 12 : 0)));
-    this.stats.approval += (approvalTarget - this.stats.approval) * 0.06;
-  }
-
-  private updateEnergyNetwork() {
-    const plants = this.buildings.filter(b => b.type === 'powerplant');
-    const produced = plants.length * 420;
-    const consumed = this.buildings.reduce((sum, b) => {
-      const def = BUILDINGS[b.type];
-      const base = b.type === 'residential' ? 28 : b.type === 'commercial' ? 42 : b.type === 'industrial' ? 72 : Math.max(8, def.workSlots * 4);
-      return sum + base;
-    }, 0);
-    const coverage = consumed === 0 ? 100 : Math.min(100, Math.round(produced / consumed * 100));
-    const overload = produced === 0 ? 100 : Math.max(0, Math.round((consumed - produced) / produced * 100));
-    this.stats.energy = { produced, consumed, coverage, overload, outage: consumed > produced };
-    for (const building of this.buildings) {
-      const powered = building.type === 'powerplant' || plants.some(plant => Math.hypot(plant.x - building.x, plant.y - building.y) < 58);
-      for (let oy = 0; oy < building.size; oy++) for (let ox = 0; ox < building.size; ox++) this.tiles[building.y + oy][building.x + ox].powered = powered && !this.stats.energy.outage;
-    }
-  }
-
-  private updateZoneDemand(population: number, jobs: number, socialValue: number) {
-    const counts = {
-      residential: this.countPlacedBuildings('residential'),
-      commercial: this.countPlacedBuildings('commercial'),
-      industrial: this.countPlacedBuildings('industrial'),
-    };
-    const serviceBonus = Math.min(18, socialValue * 0.5);
-    this.stats.zoneDemand = {
-      residential: Math.max(0, Math.min(100, Math.round(58 + Math.max(0, jobs - population) * 0.16 + this.stats.community * 0.22 - counts.residential * 4 - (this.stats.energy.outage ? 12 : 0)))),
-      commercial: Math.max(0, Math.min(100, Math.round(42 + population * 0.08 + this.stats.employment * 0.22 + serviceBonus - counts.commercial * 7 - this.stats.crime * 0.18))),
-      industrial: Math.max(0, Math.min(100, Math.round(38 + Math.max(0, population - jobs) * 0.12 + this.stats.community * 0.08 - counts.industrial * 6 - (this.stats.energy.outage ? 18 : 0)))),
-    };
-  }
-
-  private maybeSpawnIncident() {
-    if (this.tickCount - this.lastIncidentTick < 480 || !this.buildings.length) return;
-    this.lastIncidentTick = this.tickCount;
-    const risky = this.buildings.filter(b => ['residential', 'commercial', 'industrial', 'casino'].includes(b.type));
-    const target = risky[Math.floor(Math.random() * risky.length)]; if (!target) return;
-    const tile = this.tiles[target.y][target.x];
-    if (Math.random() < 0.72) { tile.hasCrime = true; this.addMessage('Сигнал: криминальная активность', '#f4cf68', target.x * TILE_SIZE, target.y * TILE_SIZE); }
-    else { tile.hasFire = true; this.addMessage('Сигнал: пожар в квартале', '#f47067', target.x * TILE_SIZE, target.y * TILE_SIZE); }
-  }
-
-  private maybeGangActivity() {
-    if (this.tickCount - this.lastGangTick < 720) return;
-    this.lastGangTick = this.tickCount;
-    const gang = GANG_IDS[Math.floor(Math.random() * GANG_IDS.length)];
-    const target = this.buildings.filter(b => ['commercial', 'industrial', 'casino'].includes(b.type))[Math.floor(Math.random() * Math.max(1, this.buildings.filter(b => ['commercial', 'industrial', 'casino'].includes(b.type)).length))];
-    if (target) { for (let oy = 0; oy < target.size; oy++) for (let ox = 0; ox < target.size; ox++) this.tiles[target.y + oy][target.x + ox].gang = gang; }
-    this.spawnGangMember(gang);
-    if (Math.random() < 0.55) this.spawnGangVehicle(gang);
-  }
-
-  private findNearestIncident(x: number, y: number, kind: 'crime' | 'fire' = 'crime') {
-    let match: { x: number; y: number; distance: number } | null = null;
-    for (const building of this.buildings) {
-      const tile = this.tiles[building.y][building.x]; if (kind === 'crime' ? !tile.hasCrime : !tile.hasFire) continue;
-      const distance = Math.hypot(building.x * TILE_SIZE - x, building.y * TILE_SIZE - y);
-      if (!match || distance < match.distance) match = { x: building.x, y: building.y, distance };
-    }
-    return match;
-  }
-
-  private findGangTile(gang: GangId) {
-    for (const building of this.buildings) if (this.tiles[building.y][building.x].gang === gang) return { x: building.x, y: building.y };
-    const i = GANG_IDS.indexOf(gang as Exclude<GangId, 'none'>); return { x: 42 + i * 21, y: 30 + (i % 2) * 46 };
-  }
-
-  private getBuildingById(id?: number) { return this.buildings.find(b => b.id === id); }
-  getNearestBuilding(x: number, y: number, types?: TileType[]) {
-    const candidates = types ? this.buildings.filter(b => types.includes(b.type)) : this.buildings;
-    return candidates.reduce<BuildingInstance | undefined>((best, candidate) => !best || Math.hypot(candidate.x * TILE_SIZE - x, candidate.y * TILE_SIZE - y) < Math.hypot(best.x * TILE_SIZE - x, best.y * TILE_SIZE - y) ? candidate : best, undefined);
-  }
-  private findWorkplace(profession: Profession) {
-    const type = Object.entries(PROFESSION_FOR_BUILDING).find(([, value]) => value === profession)?.[0] as TileType | undefined;
-    return type ? this.buildings.find(b => b.type === type) : undefined;
-  }
-
-  private refreshAssignments() {
-    const homes = this.buildings.filter(b => b.type === 'residential');
-    const workplaces = this.buildings.filter(b => BUILDINGS[b.type].workSlots > 0);
-    let cursor = 0;
-    for (const ped of this.pedestrians) {
-      if (ped.type !== 'civilian') continue;
-      ped.homeBuildingId = homes.length ? homes[ped.id % homes.length].id : undefined;
-      const workplace = workplaces.length ? workplaces[cursor++ % workplaces.length] : undefined;
-      ped.workBuildingId = workplace?.id;
-      ped.profession = workplace ? PROFESSION_FOR_BUILDING[workplace.type] ?? 'resident' : 'resident';
-    }
-  }
-
-  private getSeparatedRoadPosition(minDistance = 32) {
-    let candidate = this.getRandomRoadPosition();
-    for (let attempt = 0; attempt < 40; attempt++) {
-      candidate = this.getRandomRoadPosition();
-      if (this.vehicles.every(vehicle => Math.hypot(vehicle.x - candidate.x, vehicle.y - candidate.y) >= minDistance)) return candidate;
-    }
-    return candidate;
-  }
-
-  spawnRandomVehicle() {
-    const types: Vehicle['type'][] = ['car', 'car', 'taxi', 'sport']; const type = types[Math.floor(Math.random() * types.length)]; const pos = this.getSeparatedRoadPosition();
-    this.vehicles.push({ id: uid(), x: pos.x, y: pos.y, vx: 0, vy: 0, angle: pos.angle, speed: 0, health: 100, type, gang: 'none', driver: 'civilian', passengers: 0, routeKind: 'road', stuckTicks: 0 });
-  }
-
-  private spawnTransitVehicle(type: 'tram' | 'train', x: number, y: number) {
-    const pos = this.nearestTransitPosition((x + 1) * TILE_SIZE, (y + 1) * TILE_SIZE, type);
-    if (!pos) { this.addMessage(`${type === 'tram' ? 'Трамвай' : 'Поезд'} ждёт рельсов`, '#f4cf68'); return; }
-    this.vehicles.push({ id: uid(), x: pos.x, y: pos.y, vx: 0, vy: 0, angle: pos.angle, speed: 0, health: 180, type, gang: 'none', driver: 'transit', passengers: 0, routeKind: type === 'train' ? 'rail' : 'tram', stopTimer: 18 });
-    this.addMessage(`${type === 'tram' ? 'Трамвай' : 'Поезд'} вышел на линию`, '#69d9c8');
-  }
-
-  private spawnGangVehicle(gang: Exclude<GangId, 'none'>) {
-    const pos = this.getSeparatedRoadPosition(48);
-    this.vehicles.push({ id: uid(), x: pos.x, y: pos.y, vx: 0, vy: 0, angle: pos.angle, speed: 0, health: 120, type: 'gang', gang, driver: 'gang', passengers: 2, routeKind: 'road', stuckTicks: 0 });
-  }
-
-  spawnPedestrian(type: Pedestrian['type'], x?: number, y?: number, gang: GangId = 'none') {
-    const civilianHome = type === 'civilian' ? this.buildings.filter(building => ['residential', 'commercial', 'park'].includes(building.type))[this.pedestrians.length % Math.max(1, this.buildings.filter(building => ['residential', 'commercial', 'park'].includes(building.type)).length)] : undefined;
-    const pos = x === undefined || y === undefined
-      ? civilianHome ? { x: (civilianHome.x + civilianHome.size / 2) * TILE_SIZE, y: (civilianHome.y + civilianHome.size / 2) * TILE_SIZE, angle: Math.random() * Math.PI * 2 } : this.getRandomRoadPosition()
-      : { x, y, angle: Math.random() * Math.PI * 2 };
-    const roleProfession: Record<Pedestrian['type'], Profession> = { civilian: 'resident', officer: 'officer', enforcer: 'gang', firefighter: 'firefighter', medic: 'medic' };
-    const ped: Pedestrian = { id: uid(), x: pos.x, y: pos.y, vx: 0, vy: 0, angle: pos.angle, speed: 0.7, type, profession: roleProfession[type], gang, health: type === 'enforcer' ? 65 : type === 'officer' ? 85 : 45, state: 'walking', weaponCooldown: 0, socialMeter: 38 + Math.random() * 30, mood: 48 + Math.random() * 22, decisionTick: 0 };
-    this.pedestrians.push(ped); return ped;
-  }
-
-  private spawnGangMember(gang: Exclude<GangId, 'none'>) {
-    const territory = this.findGangTile(gang); const spread = this.pedestrians.filter(ped => ped.gang === gang && ped.type === 'enforcer').length; const ox = (spread % 3 - 1) * 28; const oy = (Math.floor(spread / 3) % 3 - 1) * 28; this.spawnPedestrian('enforcer', territory.x * TILE_SIZE + ox, territory.y * TILE_SIZE + oy, gang);
-  }
-
-  private fireNpcBullet(ped: Pedestrian, targetX: number, targetY: number, damage: number) {
-    const angle = Math.atan2(targetY - ped.y, targetX - ped.x); this.bullets.push({ id: uid(), x: ped.x, y: ped.y, vx: Math.cos(angle) * 6, vy: Math.sin(angle) * 6, damage, owner: ped.type === 'officer' ? 'police' : 'gang', life: 48 }); ped.weaponCooldown = 42;
-  }
-
-  private getRandomRoadPosition() {
-    for (let i = 0; i < 150; i++) { const x = 36 + Math.floor(Math.random() * 88), y = 26 + Math.floor(Math.random() * 70); if (this.isRoadTile(x, y)) return { x: x * TILE_SIZE + 8, y: y * TILE_SIZE + 8, angle: [0, Math.PI / 2, Math.PI, -Math.PI / 2][Math.floor(Math.random() * 4)] }; }
-    return { x: 80 * TILE_SIZE, y: 60 * TILE_SIZE, angle: 0 };
-  }
-
-  private findNearestRoadPosition(worldX: number, worldY: number) {
-    const sx = Math.floor(worldX / TILE_SIZE), sy = Math.floor(worldY / TILE_SIZE); let best: { x: number; y: number; distance: number } | null = null;
-    for (let radius = 0; radius < 50; radius++) {
-      for (let y = sy - radius; y <= sy + radius; y++) for (let x = sx - radius; x <= sx + radius; x++) {
-        if (!this.isRoadTile(x, y)) continue;
-        const distance = Math.hypot(x - sx, y - sy);
-        if (!best || distance < best.distance) best = { x, y, distance };
-      }
-      const selected = best as { x: number; y: number; distance: number } | null;
-      if (selected !== null) return { x: selected.x * TILE_SIZE + 8, y: selected.y * TILE_SIZE + 8, angle: 0 };
-    }
-    return this.getRandomRoadPosition();
-  }
-
-  isRoadTile(x: number, y: number) {
-    if (x < 0 || y < 0 || x >= MAP_WIDTH || y >= MAP_HEIGHT) return false;
-    const type = this.tiles[y][x].type;
-    return type === 'road' || type === 'bridge';
-  }
-  isRoadPosition(x: number, y: number) { return this.isRoadTile(Math.floor(x / TILE_SIZE), Math.floor(y / TILE_SIZE)); }
-  private isTransitPosition(x: number, y: number, kind: 'tram' | 'train') {
-    const tx = Math.floor(x / TILE_SIZE), ty = Math.floor(y / TILE_SIZE), type = kind === 'tram' ? 'tramrail' : 'rail';
-    return tx >= 0 && ty >= 0 && tx < MAP_WIDTH && ty < MAP_HEIGHT && this.tiles[ty][tx].type === type;
-  }
-  private isBlocked(x: number, y: number, _margin = 4) {
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return true;
-    const tx = Math.floor(x / TILE_SIZE), ty = Math.floor(y / TILE_SIZE);
-    if (tx < 0 || ty < 0 || tx >= MAP_WIDTH || ty >= MAP_HEIGHT) return true;
-    const tile = this.tiles[ty]?.[tx];
-    if (!tile) return true;
-    return tile.type !== 'grass' && tile.type !== 'road' && tile.type !== 'bridge' && tile.type !== 'park';
-  }
-
-  private updateCamera(input: Input) {
-    if (this.mode === 'strategy') { const speed = 8; if (input.keys.ArrowLeft || input.keys.KeyA) this.camera.x -= speed; if (input.keys.ArrowRight || input.keys.KeyD) this.camera.x += speed; if (input.keys.ArrowUp || input.keys.KeyW) this.camera.y -= speed; if (input.keys.ArrowDown || input.keys.KeyS) this.camera.y += speed; }
-    else this.centerCameraOnPlayer();
     this.camera.x = Math.max(0, Math.min(MAP_WIDTH * TILE_SIZE - this.viewportWidth / this.camera.zoom, this.camera.x));
     this.camera.y = Math.max(0, Math.min(MAP_HEIGHT * TILE_SIZE - this.viewportHeight / this.camera.zoom, this.camera.y));
   }
-  private centerCameraOnPlayer() { this.camera.x = this.player.x - this.viewportWidth / (2 * this.camera.zoom); this.camera.y = this.player.y - this.viewportHeight / (2 * this.camera.zoom); }
-  screenToWorld(screenX: number, screenY: number) {
-    return { x: this.camera.x + screenX / this.camera.zoom, y: this.camera.y + screenY / this.camera.zoom };
-  }
 
+  /** Масштабирование камеры (ближе/дальше) */
   zoomCamera(factor: number, originX = this.viewportWidth / 2, originY = this.viewportHeight / 2) {
-    const old = this.camera.zoom, next = Math.max(0.5, Math.min(3, old * factor));
-    const world = this.screenToWorld(originX, originY);
-    this.camera.zoom = next;
-    this.camera.x = world.x - originX / next;
-    this.camera.y = world.y - originY / next;
+    const oldZoom = this.camera.zoom;
+    const newZoom = Math.max(0.4, Math.min(4.0, oldZoom * factor));
+    if (oldZoom === newZoom) return;
+
+    // Мировая точка под фокусом зума
+    const worldX = this.camera.x + originX / oldZoom;
+    const worldY = this.camera.y + originY / oldZoom;
+
+    this.camera.zoom = newZoom;
+
+    if (this.mode === 'strategy') {
+      this.camera.x = worldX - originX / newZoom;
+      this.camera.y = worldY - originY / newZoom;
+      this.camera.x = Math.max(0, Math.min(MAP_WIDTH * TILE_SIZE - this.viewportWidth / this.camera.zoom, this.camera.x));
+      this.camera.y = Math.max(0, Math.min(MAP_HEIGHT * TILE_SIZE - this.viewportHeight / this.camera.zoom, this.camera.y));
+    }
   }
 
-  addMessage(text: string, color = '#eaf1f4', x = this.player.x, y = this.player.y) { this.messages.push({ id: this.messageIdCounter++, text, color, life: 150, x, y }); }
-  emitParticles(x: number, y: number, color: string, count: number) { for (let i = 0; i < count; i++) this.particles.push({ x, y, vx: (Math.random() - 0.5) * 2, vy: (Math.random() - 0.5) * 2, life: 28 + Math.random() * 30, maxLife: 58, color, size: 1 + Math.floor(Math.random() * 2) }); }
-  countPlacedBuildings(type: TileType) { return this.buildings.filter(b => b.type === type).length; }
-  depositToBank(amount: number) { if (amount <= 0 || amount > this.stats.money) return false; this.stats.money -= amount; this.deposit += amount; return true; }
-  withdrawFromBank(amount: number) { if (amount <= 0 || amount > this.deposit) return false; this.deposit -= amount; this.stats.money += amount; return true; }
-  takeLoan(amount: number) { if (amount <= 0 || amount > Math.max(1000, this.stats.income * 24 + this.deposit * 2)) return false; this.loanAmount += amount; this.stats.money += amount; return true; }
-  repayLoan(amount: number) { const value = Math.min(amount, this.loanAmount, this.stats.money); if (value <= 0) return false; this.loanAmount -= value; this.stats.money -= value; return true; }
-  private playerDeath() { this.gameOver = true; this.autopilot = false; this.addMessage('Поток оборвался. Нажмите R для перезапуска.', '#f47067'); }
-  respawnHero() { this.player.health = this.player.maxHealth; this.player.wanted = 0; this.player.x = 80 * TILE_SIZE; this.player.y = 60 * TILE_SIZE; this.autopilot = false; }
-  restart() { this.clearSavedGame(); nextId = 1; Object.assign(this, new Game()); }
-  getGangColor(gang: GangId) { return GANG_COLORS[gang]; }
-  getGangMeta(gang: Exclude<GangId, 'none'>) { return GANGS[gang]; }
+  updateStrategy(input: Input) {
+    let tx = Math.floor((input.mouseX + this.camera.x) / TILE_SIZE);
+    let ty = Math.floor((input.mouseY + this.camera.y) / TILE_SIZE);
+
+    // Если инструмент размера 2x2 — привязываем к чётным координатам
+    const def = BUILDINGS[this.tool as keyof typeof BUILDINGS];
+    if (def?.size === 2) {
+      tx -= tx % 2;
+      ty -= ty % 2;
+    }
+
+    this.hoveredTile = { x: tx, y: ty };
+    if (tx >= 0 && ty >= 0 && tx < MAP_WIDTH && ty < MAP_HEIGHT) {
+      if (input.mouseDown) {
+        if (this.tool === 'bulldoze') this.bulldozeTile(tx, ty);
+        else if (this.tool === 'select' || this.tool === 'inspect') this.selectedTile = { x: tx, y: ty };
+        else this.placeTool(tx, ty);
+      }
+      if (input.rightDown) {
+        this.selectedTile = { x: tx, y: ty };
+        this.tool = 'inspect';
+      }
+    }
+  }
+
+  // ----------------------------------------------------------------
+  //   ЭКШЕН — ДВИЖЕНИЕ С ФИЗИКОЙ
+  // ----------------------------------------------------------------
+  updateAction(input: Input, _dt: number) {
+    let dx = 0, dy = 0;
+    if (input.keys['KeyW'] || input.keys['ArrowUp']) dy -= 1;
+    if (input.keys['KeyS'] || input.keys['ArrowDown']) dy += 1;
+    if (input.keys['KeyA'] || input.keys['ArrowLeft']) dx -= 1;
+    if (input.keys['KeyD'] || input.keys['ArrowRight']) dx += 1;
+    if (dx !== 0 || dy !== 0) { const l = Math.sqrt(dx * dx + dy * dy); dx /= l; dy /= l; }
+
+    if (this.playerInVehicleId !== null) {
+      const v = this.vehicles.find(v => v.id === this.playerInVehicleId);
+      if (v) {
+        if (!this.isRoadPosition(v.x, v.y, 6)) {
+          const pos = this.findNearestRoadPosition(v.x, v.y);
+          v.x = pos.x; v.y = pos.y; v.vx = 0; v.vy = 0;
+        }
+        const accel = 0.3;
+        const friction = 0.04;
+        v.vx += dx * accel;
+        v.vy += dy * accel;
+        v.vx *= (1 - friction);
+        v.vy *= (1 - friction);
+        const sp = Math.sqrt(v.vx * v.vx + v.vy * v.vy);
+        if (sp > 0.1) v.angle = Math.atan2(v.vy, v.vx);
+        const newX = v.x + v.vx;
+        const newY = v.y + v.vy;
+        // В режиме боя машины едут только по дорогам.
+        if (this.isRoadPosition(newX, v.y, 7)) v.x = newX; else v.vx = 0;
+        if (this.isRoadPosition(v.x, newY, 7)) v.y = newY; else v.vy = 0;
+        this.resolveVehicleCollision(v, 16);
+        this.resolveVehicleCollision(v, 16);
+        this.player.x = v.x;
+        this.player.y = v.y;
+        v.speed = sp;
+      }
+    } else {
+      const speed = 2.2;
+      const newX = this.player.x + dx * speed;
+      const newY = this.player.y + dy * speed;
+      // Коллизия со зданиями
+      if (!this.isBlockedByBuilding(newX, this.player.y, 4)) this.player.x = newX;
+      if (!this.isBlockedByBuilding(this.player.x, newY, 4)) this.player.y = newY;
+      this.resolveVehicleCollision(this.player, 10);
+      if (dx !== 0 || dy !== 0) this.player.angle = Math.atan2(dy, dx);
+      this.player.speed = Math.sqrt(dx * dx + dy * dy) * speed;
+    }
+
+    this.player.x = Math.max(TILE_SIZE, Math.min(MAP_WIDTH * TILE_SIZE - TILE_SIZE, this.player.x));
+    this.player.y = Math.max(TILE_SIZE, Math.min(MAP_HEIGHT * TILE_SIZE - TILE_SIZE, this.player.y));
+
+    // Оружейный магазин: пополняет патроны и временно дает суперпушку.
+    if (this.playerInVehicleId === null) {
+      const px = Math.floor(this.player.x / TILE_SIZE);
+      const py = Math.floor(this.player.y / TILE_SIZE);
+      for (let oy = -1; oy <= 1; oy++) {
+        for (let ox = -1; ox <= 1; ox++) {
+          const tx = px + ox;
+          const ty = py + oy;
+          if (tx >= 0 && ty >= 0 && tx < MAP_WIDTH && ty < MAP_HEIGHT && this.tiles[ty][tx].type === 'gunshop') {
+            if (this.player.ammo < this.player.maxAmmo || !this.superWeapon) {
+              this.player.ammo = this.player.maxAmmo;
+              this.superWeapon = true;
+              this.superWeaponTimer = 900;
+              this.addMessage('🔫 Оружейный магазин: полный боекомплект!', '#ff2d8a');
+              this.emitParticles(this.player.x, this.player.y, '#ff2d8a', 14, 2);
+            }
+          }
+        }
+      }
+    }
+
+    const worldX = input.mouseX + this.camera.x;
+    const worldY = input.mouseY + this.camera.y;
+    this.player.angle = Math.atan2(worldY - this.player.y, worldX - this.player.x);
+
+    if (input.mouseDown && this.shootingCooldown === 0) this.shoot();
+
+    if (input.keys['KeyF']) {
+      if (this.playerInVehicleId === null) {
+        const near = this.vehicles.find(v => Math.hypot(v.x - this.player.x, v.y - this.player.y) < 30);
+        if (near) {
+          this.playerInVehicleId = near.id;
+          near.driver = 'player';
+          this.player.inVehicle = true;
+          this.addMessage('В машине! [F] чтобы выйти', '#00f0ff');
+        }
+      } else {
+        const v = this.vehicles.find(v => v.id === this.playerInVehicleId);
+        if (v) v.driver = 'civilian';
+        this.playerInVehicleId = null;
+        this.player.inVehicle = false;
+        this.addMessage('Вышел из машины', '#00f0ff');
+      }
+      input.keys['KeyF'] = false;
+    }
+
+    if (this.player.wanted > 0) {
+      this.wantedDecayTimer++;
+      if (this.wantedDecayTimer > 600) {
+        this.player.wanted = Math.max(0, this.player.wanted - 1);
+        this.wantedDecayTimer = 0;
+      }
+    }
+  }
+
+  shoot() {
+    if (this.player.ammo <= 0) {
+      this.addMessage('Нет патронов!', '#ff4444');
+      this.shootingCooldown = 30;
+      return;
+    }
+    this.player.ammo--;
+    this.shootingCooldown = this.superWeapon ? 3 : 12;
+    this.bullets.push({
+      id: uid(),
+      x: this.player.x, y: this.player.y,
+      vx: Math.cos(this.player.angle) * (this.superWeapon ? 12 : 8),
+      vy: Math.sin(this.player.angle) * (this.superWeapon ? 12 : 8),
+      damage: this.superWeapon ? 80 : 25, owner: 'player', life: 60,
+    });
+    this.emitParticles(
+      this.player.x + Math.cos(this.player.angle) * 12,
+      this.player.y + Math.sin(this.player.angle) * 12,
+      '#ffea00', 3, 1.5,
+    );
+  }
+
+  // ----------------------------------------------------------------
+  //   ПЕШЕХОДЫ И МАШИНЫ
+  // ----------------------------------------------------------------
+  updateVehicles(_dt: number) {
+    for (const v of this.vehicles) {
+      if (v.id === this.playerInVehicleId) continue;
+      if (v.type === 'airplane') {
+        this.driveAirplane(v);
+      } else if (v.driver === 'civilian' || v.driver === 'gang' || v.driver === 'police' || v.driver === 'transit') {
+        this.driveVehicleOnRoad(v);
+      }
+    }
+  }
+
+  // ----------------------------------------------------------------
+  //   САМОЛЁТЫ — полёт аэропорт→аэропорт, без дорог
+  // ----------------------------------------------------------------
+  findAllAirportPositions(): { x: number; y: number }[] {
+    const results: { x: number; y: number }[] = [];
+    for (let ty = 0; ty < MAP_HEIGHT - 1; ty++) {
+      for (let tx = 0; tx < MAP_WIDTH - 1; tx++) {
+        // Ищем левый-верхний угол 2×2 аэропорта
+        if (
+          this.tiles[ty][tx].type === 'airport' &&
+          this.tiles[ty][tx + 1]?.type === 'airport' &&
+          this.tiles[ty + 1]?.[tx]?.type === 'airport' &&
+          this.tiles[ty + 1]?.[tx + 1]?.type === 'airport'
+        ) {
+          results.push({
+            x: (tx + 1) * TILE_SIZE,
+            y: (ty + 1) * TILE_SIZE,
+          });
+          tx++; // Пропускаем правую половину, чтобы не дублировать
+        }
+      }
+    }
+    return results;
+  }
+
+  driveAirplane(v: Vehicle) {
+    const airports = this.findAllAirportPositions();
+
+    // Если аэропортов нет — самолёт просто не летает
+    if (airports.length === 0) {
+      v.vx = 0; v.vy = 0; v.speed = 0;
+      return;
+    }
+
+    // Назначаем цель, если её нет или самолёт уже прилетел
+    if (v.targetX === undefined || v.targetY === undefined || v.phase === undefined) {
+      v.altitude = 0;
+      v.phase = 'taxiing';
+      // Выбираем другой аэропорт как цель
+      const others = airports.filter(a => Math.hypot(a.x - v.x, a.y - v.y) > TILE_SIZE * 4);
+      const target = others.length > 0
+        ? others[Math.floor(Math.random() * others.length)]
+        : airports[Math.floor(Math.random() * airports.length)];
+      v.targetX = target.x;
+      v.targetY = target.y;
+    }
+
+    const tx = v.targetX!;
+    const ty = v.targetY!;
+    const dist = Math.hypot(tx - v.x, ty - v.y);
+
+    if (v.phase === 'taxiing') {
+      // Короткая «рулёжка» перед взлётом — самолёт чуть смещается
+      v.altitude = 0;
+      v.speed = 0.5;
+      const ang = Math.atan2(ty - v.y, tx - v.x);
+      v.angle = ang;
+      v.vx = Math.cos(ang) * v.speed;
+      v.vy = Math.sin(ang) * v.speed;
+      v.x += v.vx;
+      v.y += v.vy;
+      if (this.tickCount % 60 === 0) v.phase = 'takeoff';
+
+    } else if (v.phase === 'takeoff') {
+      // Набор высоты
+      v.altitude = Math.min(1, (v.altitude ?? 0) + 0.012);
+      const ang = Math.atan2(ty - v.y, tx - v.x);
+      v.angle += (ang - v.angle) * 0.06;
+      v.speed = 1.2 + (v.altitude ?? 0) * 1.8;
+      v.vx = Math.cos(v.angle) * v.speed;
+      v.vy = Math.sin(v.angle) * v.speed;
+      v.x += v.vx;
+      v.y += v.vy;
+      if ((v.altitude ?? 0) >= 1) v.phase = 'cruise';
+
+    } else if (v.phase === 'cruise') {
+      v.altitude = 1;
+      v.speed = 3.0;
+      const ang = Math.atan2(ty - v.y, tx - v.x);
+      // Плавный разворот
+      const diff = Math.atan2(Math.sin(ang - v.angle), Math.cos(ang - v.angle));
+      v.angle += diff * 0.04;
+      v.vx = Math.cos(v.angle) * v.speed;
+      v.vy = Math.sin(v.angle) * v.speed;
+      v.x += v.vx;
+      v.y += v.vy;
+      if (dist < TILE_SIZE * 12) v.phase = 'landing';
+
+    } else if (v.phase === 'landing') {
+      // Снижение
+      v.altitude = Math.max(0, (v.altitude ?? 1) - 0.018);
+      const ang = Math.atan2(ty - v.y, tx - v.x);
+      v.angle += (ang - v.angle) * 0.08;
+      v.speed = Math.max(0.4, 3.0 * (v.altitude ?? 0) + 0.4);
+      v.vx = Math.cos(v.angle) * v.speed;
+      v.vy = Math.sin(v.angle) * v.speed;
+      v.x += v.vx;
+      v.y += v.vy;
+
+      if (dist < TILE_SIZE * 2) {
+        // Прилетели — паркуемся в аэропорту
+        v.x = tx; v.y = ty;
+        v.vx = 0; v.vy = 0;
+        v.altitude = 0;
+        // Выбираем следующий аэропорт назначения
+        const others = airports.filter(a => Math.hypot(a.x - v.x, a.y - v.y) > TILE_SIZE * 4);
+        if (others.length > 0) {
+          const next = others[Math.floor(Math.random() * others.length)];
+          v.targetX = next.x;
+          v.targetY = next.y;
+        }
+        v.phase = 'taxiing';
+        this.emitParticles(v.x, v.y, '#00f0ff', 12, 1.5);
+      }
+    }
+
+    // Оборачиваем по краям карты (если карта не дошла до аэропорта)
+    if (v.x < 0) v.x = MAP_WIDTH * TILE_SIZE;
+    if (v.x > MAP_WIDTH * TILE_SIZE) v.x = 0;
+    if (v.y < 0) v.y = MAP_HEIGHT * TILE_SIZE;
+    if (v.y > MAP_HEIGHT * TILE_SIZE) v.y = 0;
+    v.speed = Math.sqrt(v.vx * v.vx + v.vy * v.vy);
+  }
+
+  driveVehicleOnRoad(v: Vehicle) {
+    if (!this.isRoadPosition(v.x, v.y, 6)) {
+      const pos = this.findNearestRoadPosition(v.x, v.y);
+      v.x = pos.x; v.y = pos.y; v.vx = 0; v.vy = 0;
+    }
+
+    const tx = Math.floor(v.x / TILE_SIZE);
+    const ty = Math.floor(v.y / TILE_SIZE);
+    const cx = tx * TILE_SIZE + TILE_SIZE / 2;
+    const cy = ty * TILE_SIZE + TILE_SIZE / 2;
+    const dirs = this.getRoadDirections(v.x, v.y);
+    if (dirs.length === 0) { v.vx = 0; v.vy = 0; v.speed = 0; return; }
+
+    let dir = this.cardinalDirection(v.angle);
+    const forwardAvailable = this.isRoadTile(tx + dir.dx, ty + dir.dy);
+    const laneCenter = this.getLaneCenter(tx, ty, dir.angle);
+    const nearNode = dir.dx !== 0
+      ? Math.abs(v.x - cx) < 1.4
+      : Math.abs(v.y - cy) < 1.4;
+
+    // Плавно держим транспорт в своей полосе
+    if (dir.dx !== 0) v.y += (laneCenter.y - v.y) * 0.25;
+    else v.x += (laneCenter.x - v.x) * 0.25;
+
+    const blockX = Math.floor(tx / 2);
+    const blockY = Math.floor(ty / 2);
+
+    if (nearNode || !forwardAvailable || Math.abs(v.vx) + Math.abs(v.vy) < 0.05) {
+      // Чтобы машина не дёргалась на перекрёстках и не перескакивала туда-сюда,
+      // принимаем решение только 1 раз за перекрёсток (блок 2x2)
+      if (v.lastDecisionBlock?.x !== blockX || v.lastDecisionBlock?.y !== blockY || !forwardAvailable) {
+        v.lastDecisionBlock = { x: blockX, y: blockY };
+        const reverse = dirs.find(d => d.dx === -dir.dx && d.dy === -dir.dy);
+        const forward = dirs.find(d => d.dx === dir.dx && d.dy === dir.dy);
+        const turnChoices = dirs.filter(d => !(d.dx === -dir.dx && d.dy === -dir.dy));
+        const choices = turnChoices.length > 0 ? turnChoices : (reverse ? [reverse] : dirs);
+        const shouldKeepForward = forward && forwardAvailable && Math.random() < 0.76;
+        const next = shouldKeepForward ? forward : choices[Math.floor(Math.random() * choices.length)];
+        if (next) {
+          v.angle = next.angle;
+          dir = next;
+        }
+      }
+    }
+
+    const targetSpeed = v.type === 'sport' ? 1.75
+      : v.type === 'bus' ? 1.05
+      : v.type === 'tram' ? 1.2
+      : v.type === 'train' ? 1.5
+      : 1.25;
+    const brake = this.hasVehicleAhead(v, v.angle, v.type === 'train' ? 34 : 24);
+    const speed = brake ? 0.15 : targetSpeed;
+    v.vx = Math.cos(v.angle) * speed;
+    v.vy = Math.sin(v.angle) * speed;
+
+    const newX = v.x + v.vx;
+    const newY = v.y + v.vy;
+    if (this.isRoadPosition(newX, newY, 4)) {
+      v.x = newX;
+      v.y = newY;
+    } else {
+      v.vx = 0;
+      v.vy = 0;
+      const available = this.getRoadDirections(v.x, v.y);
+      const next = available.find(d => !(d.dx === -dir.dx && d.dy === -dir.dy)) ?? available[0];
+      if (next) v.angle = next.angle;
+    }
+
+    v.speed = Math.sqrt(v.vx * v.vx + v.vy * v.vy);
+    if (v.x < 0) v.x = MAP_WIDTH * TILE_SIZE;
+    if (v.x > MAP_WIDTH * TILE_SIZE) v.x = 0;
+    if (v.y < 0) v.y = MAP_HEIGHT * TILE_SIZE;
+    if (v.y > MAP_HEIGHT * TILE_SIZE) v.y = 0;
+  }
+
+  updatePedestrians(_dt: number) {
+    for (const p of this.pedestrians) {
+      if (p.state === 'dead') continue;
+      if (p.weaponCooldown > 0) p.weaponCooldown--;
+
+      if (p.state === 'walking') {
+        if (Math.random() < 0.05) p.angle = Math.random() * Math.PI * 2;
+
+        if (p.type === 'police' && this.player.wanted > 0) {
+          const dx = this.player.x - p.x, dy = this.player.y - p.y;
+          const d = Math.hypot(dx, dy);
+          if (d < 300) {
+            p.angle = Math.atan2(dy, dx);
+            p.speed = 1.5;
+            if (d < 200 && p.weaponCooldown === 0) {
+              this.bullets.push({ id: uid(), x: p.x, y: p.y, vx: Math.cos(p.angle) * 6, vy: Math.sin(p.angle) * 6, damage: 10, owner: 'police', life: 50 });
+              p.weaponCooldown = 30;
+            }
+          } else p.speed = 0.7;
+        } else if (p.type === 'firefighter') {
+          let nearestFire: { x: number, y: number, d: number } | null = null;
+          for (let y = 0; y < MAP_HEIGHT; y++) for (let x = 0; x < MAP_WIDTH; x++) {
+            if (this.tiles[y][x].hasFire) { const d = Math.hypot(x * TILE_SIZE - p.x, y * TILE_SIZE - p.y); if (!nearestFire || d < nearestFire.d) nearestFire = { x: x * TILE_SIZE, y: y * TILE_SIZE, d }; }
+          }
+          if (nearestFire) {
+            p.angle = Math.atan2(nearestFire.y - p.y, nearestFire.x - p.x);
+            p.speed = 1.5;
+            if (nearestFire.d < 30) {
+              this.tiles[Math.floor(nearestFire.y / TILE_SIZE)][Math.floor(nearestFire.x / TILE_SIZE)].hasFire = false;
+              this.emitParticles(nearestFire.x, nearestFire.y, '#00f0ff', 15);
+            }
+          } else p.speed = 0.7;
+        } else if (p.type === 'medic') {
+          let nearestWounded: { id: number, x: number, y: number, d: number } | null = null;
+          for (const other of this.pedestrians) {
+            if (other.state === 'dead' || other === p || other.health > 30) continue;
+            const d = Math.hypot(other.x - p.x, other.y - p.y);
+            if (!nearestWounded || d < nearestWounded.d) nearestWounded = { id: other.id, x: other.x, y: other.y, d };
+          }
+          if (nearestWounded) {
+            p.angle = Math.atan2(nearestWounded.y - p.y, nearestWounded.x - p.x);
+            p.speed = 1.5;
+            if (nearestWounded.d < 30) {
+              const target = this.pedestrians.find(x => x.id === nearestWounded!.id);
+              if (target) target.health = Math.min(target.health + 30, 80);
+            }
+          } else p.speed = 0.7;
+        } else if (p.type === 'gang1' || p.type === 'gang2' || p.type === 'gang3') {
+          let nearestEnemy: { x: number, y: number, d: number, isPlayer: boolean } | null = null;
+          if (this.player.wanted > 0 || this.playerInVehicleId !== null) {
+            const d = Math.hypot(this.player.x - p.x, this.player.y - p.y);
+            if (d < 350) nearestEnemy = { x: this.player.x, y: this.player.y, d, isPlayer: true };
+          }
+          for (const other of this.pedestrians) {
+            if (other === p || other.state === 'dead' || other.type === p.type || other.type === 'police' || other.type === 'firefighter' || other.type === 'medic' || !other.type.startsWith('gang')) continue;
+            const d = Math.hypot(other.x - p.x, other.y - p.y);
+            if ((!nearestEnemy || d < nearestEnemy.d) && d < 300) nearestEnemy = { x: other.x, y: other.y, d, isPlayer: false };
+          }
+          if (nearestEnemy) {
+            p.angle = Math.atan2(nearestEnemy.y - p.y, nearestEnemy.x - p.x);
+            p.speed = 1.4;
+            if (nearestEnemy.d < 250 && p.weaponCooldown === 0) {
+              this.bullets.push({ id: uid(), x: p.x, y: p.y, vx: Math.cos(p.angle) * 6, vy: Math.sin(p.angle) * 6, damage: 15, owner: nearestEnemy.isPlayer ? (p.type === 'gang1' ? 'gang1' : p.type === 'gang2' ? 'gang2' : 'gang3') : 'gang1', life: 50 });
+              p.weaponCooldown = 40;
+            }
+          } else p.speed = 0.5;
+        } else p.speed = 0.7;
+
+        p.vx = Math.cos(p.angle) * p.speed;
+        p.vy = Math.sin(p.angle) * p.speed;
+        const newX = p.x + p.vx;
+        const newY = p.y + p.vy;
+        // Коллизия пешеходов со зданиями
+        if (!this.isBlockedByBuilding(newX, p.y, 3)) p.x = newX;
+        if (!this.isBlockedByBuilding(p.x, newY, 3)) p.y = newY;
+
+        if (p.x < 0) p.x = MAP_WIDTH * TILE_SIZE;
+        if (p.x > MAP_WIDTH * TILE_SIZE) p.x = 0;
+        if (p.y < 0) p.y = MAP_HEIGHT * TILE_SIZE;
+        if (p.y > MAP_HEIGHT * TILE_SIZE) p.y = 0;
+      } else if (p.state === 'fleeing') {
+        const newX = p.x + p.vx;
+        const newY = p.y + p.vy;
+        if (!this.isBlockedByBuilding(newX, p.y, 3)) p.x = newX;
+        if (!this.isBlockedByBuilding(p.x, newY, 3)) p.y = newY;
+        if (Math.random() < 0.02) p.state = 'walking';
+      }
+    }
+  }
+
+  updateBullets() {
+    for (const b of this.bullets) { b.x += b.vx; b.y += b.vy; b.life--; }
+    this.bullets = this.bullets.filter(b => b.life > 0 && b.x > 0 && b.x < MAP_WIDTH * TILE_SIZE && b.y > 0 && b.y < MAP_HEIGHT * TILE_SIZE);
+  }
+
+  updateExplosions() {
+    for (const e of this.explosions) {
+      e.life--;
+      e.radius = e.maxRadius * (1 - e.life / e.maxLife);
+      if (e.life === e.maxLife - 1) {
+        for (const p of this.pedestrians) {
+          if (p.state === 'dead') continue;
+          if (Math.hypot(p.x - e.x, p.y - e.y) < e.maxRadius) {
+            p.health -= 50;
+            if (p.health <= 0) { p.state = 'dead'; if (p.type.startsWith('gang')) this.totalKills++; }
+          }
+        }
+        for (const v of this.vehicles) { if (Math.hypot(v.x - e.x, v.y - e.y) < e.maxRadius) v.health -= 60; }
+        if (Math.hypot(this.player.x - e.x, this.player.y - e.y) < e.maxRadius) { this.player.health -= 30; if (this.player.health <= 0) this.playerDeath(); }
+      }
+    }
+    this.explosions = this.explosions.filter(e => e.life > 0);
+  }
+
+  updatePickups() {
+    for (const p of this.pickups) p.life--;
+    for (const p of this.pickups) {
+      if (Math.hypot(p.x - this.player.x, p.y - this.player.y) < 20) {
+        if (p.type === 'money') { this.stats.money += p.amount; this.player.money += p.amount; this.addMessage(`+$${p.amount}`, '#39ff14', p.x, p.y); }
+        else if (p.type === 'health') { this.player.health = Math.min(this.player.maxHealth, this.player.health + p.amount); }
+        else if (p.type === 'ammo') { this.player.ammo = Math.min(this.player.maxAmmo, this.player.ammo + p.amount); }
+        else if (p.type === 'weapon') { this.player.ammo = this.player.maxAmmo; this.superWeapon = true; this.superWeaponTimer = 600; this.addMessage('🔥 СУПЕРПУШКА! 🔥', '#ff2d8a', p.x, p.y); }
+        p.life = 0;
+      }
+    }
+    this.pickups = this.pickups.filter(p => p.life > 0);
+  }
+
+  updateParticles() {
+    for (const pa of this.particles) { pa.x += pa.vx; pa.y += pa.vy; pa.vx *= 0.9; pa.vy *= 0.9; pa.life--; }
+    this.particles = this.particles.filter(p => p.life > 0);
+  }
+
+  updateMessages() {
+    for (const m of this.messages) { m.life--; m.y -= 0.5; }
+    this.messages = this.messages.filter(m => m.life > 0);
+  }
+
+  updateMissions() {
+    for (const m of this.missions) {
+      if (m.completed) continue;
+      if (m.id === 'm1') m.progress = this.totalKills % 5 === 0 ? 5 : this.totalKills % 5;
+      if (m.id === 'm2') m.progress = Math.min(m.target, this.totalEarned);
+      if (m.id === 'm3') { let c = 0; for (let y = 0; y < MAP_HEIGHT; y++) for (let x = 0; x < MAP_WIDTH; x++) if (this.tiles[y][x].type === 'park') c++; m.progress = c; }
+      if (m.id === 'm4') m.progress = this.stats.approval;
+      if (m.id === 'm5') m.progress = this.stats.population;
+      if (m.progress >= m.target && !m.completed) { m.completed = true; this.stats.money += m.reward; this.addMessage(`🎯 Миссия выполнена: ${m.title} +$${m.reward}`, '#ffea00'); }
+    }
+  }
+
+  updateCity(_dt: number) {
+    let pop = 0;
+    let crime = 0;
+    for (let y = 0; y < MAP_HEIGHT; y++) {
+      for (let x = 0; x < MAP_WIDTH; x++) {
+        const t = this.tiles[y][x];
+        if (t.type === 'residential') {
+          if (this.tickCount % 60 === 0) { t.population = Math.min(100, t.population + 5); t.level = Math.min(3, Math.floor(t.population / 35) + 1); }
+          pop += t.population;
+        }
+        if (t.hasCrime) crime += 5;
+        if (t.hasFire) this.stats.approval = Math.max(0, this.stats.approval - 0.01);
+        if (t.type === 'residential' || t.type === 'commercial' || t.type === 'industrial') {
+          if (this.tickCount % 300 === 0) {
+            const rand = Math.random();
+            if (rand < 0.05) { if (rand < 0.017) t.gang = 'loons'; else if (rand < 0.034) t.gang = 'yutes'; else t.gang = 'russians'; }
+            else if (rand > 0.95) t.gang = 'none';
+          }
+        }
+      }
+    }
+    this.stats.population = pop;
+    this.stats.crime = Math.min(100, crime);
+    const target = 50 + pop / 50 - crime;
+    this.stats.approval += (Math.max(0, Math.min(100, target)) - this.stats.approval) * 0.001;
+  }
+
+  checkCollisions() {
+    for (const b of this.bullets) {
+      for (const p of this.pedestrians) {
+        if (p.state === 'dead') continue;
+        if (Math.hypot(p.x - b.x, p.y - b.y) < 8) {
+          p.health -= b.damage;
+          b.life = 0;
+          this.emitParticles(p.x, p.y, '#c82020', 5);
+          if (p.health <= 0) { p.state = 'dead'; if (b.owner === 'player') { this.totalKills++; if (p.type.startsWith('gang')) this.player.wanted = Math.min(5, this.player.wanted + 1); if (Math.random() < 0.3) this.pickups.push({ id: uid(), x: p.x, y: p.y, type: 'money', amount: 20 + Math.floor(Math.random() * 50), life: 600 }); } }
+          break;
+        }
+      }
+    }
+    for (const b of this.bullets) {
+      if (b.owner === 'player') continue;
+      if (Math.hypot(this.player.x - b.x, this.player.y - b.y) < 8) { this.player.health -= b.damage; b.life = 0; if (this.player.health <= 0) this.playerDeath(); }
+    }
+    for (const b of this.bullets) {
+      for (const v of this.vehicles) {
+        if (Math.hypot(v.x - b.x, v.y - b.y) < 14) {
+          v.health -= b.damage; b.life = 0;
+          if (v.health <= 0) { this.explosions.push({ id: uid(), x: v.x, y: v.y, radius: 0, maxRadius: 40, life: 30, maxLife: 30 }); this.vehicles = this.vehicles.filter(x => x.id !== v.id); if (this.playerInVehicleId === v.id) { this.playerInVehicleId = null; this.player.inVehicle = false; } }
+          break;
+        }
+      }
+    }
+    this.resolveAllPhysicalCollisions();
+  }
+
+  resolveAllPhysicalCollisions() {
+    // 1. Раздвигаем машины между собой
+    for (let i = 0; i < this.vehicles.length; i++) {
+      const a = this.vehicles[i];
+      if (a.health <= 0) continue;
+      for (let j = i + 1; j < this.vehicles.length; j++) {
+        const b = this.vehicles[j];
+        if (b.health <= 0) continue;
+        const margin = (a.type === 'bus' || a.type === 'train' || a.type === 'airplane' || b.type === 'bus' || b.type === 'train' || b.type === 'airplane') ? 22 : 16;
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const d = Math.hypot(dx, dy) || 0.01;
+        if (d < margin) {
+          const push = (margin - d) * 0.5;
+          a.x -= (dx / d) * push; a.y -= (dy / d) * push;
+          b.x += (dx / d) * push; b.y += (dy / d) * push;
+        }
+      }
+      // 2. Раздвигаем пешеходов и эту машину (люди не проходят сквозь машины)
+      for (const p of this.pedestrians) {
+        if (p.state === 'dead') continue;
+        const dx = p.x - a.x;
+        const dy = p.y - a.y;
+        const d = Math.hypot(dx, dy) || 0.01;
+        if (d < 14) {
+          const push = 14 - d;
+          p.x += (dx / d) * push; p.y += (dy / d) * push;
+        }
+      }
+      // 3. Раздвигаем игрока (пешком) и эту машину
+      if (this.playerInVehicleId !== a.id) {
+        const dx = this.player.x - a.x;
+        const dy = this.player.y - a.y;
+        const d = Math.hypot(dx, dy) || 0.01;
+        if (d < 14) {
+          const push = 14 - d;
+          this.player.x += (dx / d) * push; this.player.y += (dy / d) * push;
+        }
+      }
+    }
+  }
+
+  maybeSpawnCrime() {
+    if (this.tickCount - this.lastCrimeSpawn < 600) return;
+    this.lastCrimeSpawn = this.tickCount;
+    for (let a = 0; a < 10; a++) {
+      const x = Math.floor(Math.random() * MAP_WIDTH);
+      const y = Math.floor(Math.random() * MAP_HEIGHT);
+      const t = this.tiles[y][x];
+      if ((t.type === 'commercial' || t.type === 'industrial' || t.type === 'residential') && !t.hasCrime) {
+        let nearPolice = false;
+        for (let dy = -5; dy <= 5 && !nearPolice; dy++) for (let dx = -5; dx <= 5 && !nearPolice; dx++) {
+          const nx = x + dx, ny = y + dy;
+          if (nx >= 0 && ny >= 0 && nx < MAP_WIDTH && ny < MAP_HEIGHT && this.tiles[ny][nx].type === 'policestation') nearPolice = true;
+        }
+        if (!nearPolice && Math.random() < 0.3) { t.hasCrime = true; this.spawnGangMember(['loons', 'yutes', 'russians'][Math.floor(Math.random() * 3)] as GangId); break; }
+      }
+    }
+  }
+
+  maybeSpawnFire() {
+    if (this.tickCount - this.lastFireSpawn < 1200) return;
+    this.lastFireSpawn = this.tickCount;
+    for (let a = 0; a < 5; a++) {
+      const x = Math.floor(Math.random() * MAP_WIDTH);
+      const y = Math.floor(Math.random() * MAP_HEIGHT);
+      const t = this.tiles[y][x];
+      if ((t.type === 'residential' || t.type === 'commercial' || t.type === 'industrial') && !t.hasFire && Math.random() < 0.05) { t.hasFire = true; this.addMessage('🔥 Пожар в городе!', '#ff8c00'); break; }
+    }
+  }
+
+  maybePolicePatrol() {
+    if (this.tickCount - this.policePatrolTimer < 200) return;
+    this.policePatrolTimer = this.tickCount;
+    let stations = 0;
+    for (let y = 0; y < MAP_HEIGHT; y++) for (let x = 0; x < MAP_WIDTH; x++) if (this.tiles[y][x].type === 'policestation') stations++;
+    const curPolice = this.pedestrians.filter(p => p.type === 'police' && p.state !== 'dead').length;
+    if (curPolice < Math.min(20, stations * 3)) this.spawnPedestrian('police');
+    for (let y = 0; y < MAP_HEIGHT; y++) for (let x = 0; x < MAP_WIDTH; x++) {
+      if (this.tiles[y][x].hasCrime) {
+        let near = false;
+        for (let dy = -3; dy <= 3 && !near; dy++) for (let dx = -3; dx <= 3 && !near; dx++) {
+          const nx = x + dx, ny = y + dy;
+          if (nx >= 0 && ny >= 0 && nx < MAP_WIDTH && ny < MAP_HEIGHT && this.tiles[ny][nx].type === 'policestation') near = true;
+        }
+        if (near && Math.random() < 0.05) this.tiles[y][x].hasCrime = false;
+      }
+    }
+    if (this.pedestrians.filter(p => p.type === 'firefighter' && p.state !== 'dead').length < this.countBuildings('firestation') * 2) this.spawnPedestrian('firefighter');
+    if (this.pedestrians.filter(p => p.type === 'medic' && p.state !== 'dead').length < this.countBuildings('hospital') * 2) this.spawnPedestrian('medic');
+  }
+
+  countPlacedBuildings(type: TileType): number {
+    return Math.ceil(this.countBuildings(type) / 4);
+  }
+
+  maybePublicTransport() {
+    if (this.tickCount - this.publicTransportTimer < 180) return;
+    this.publicTransportTimer = this.tickCount;
+
+    const airportTiles = this.findAllAirportPositions();
+    const desired = {
+      bus: this.countPlacedBuildings('busdepot') * 2,
+      tram: this.countPlacedBuildings('tramdepot') * 2,
+      train: this.countPlacedBuildings('trainstation'),
+      // Самолётов нужно на 1 меньше числа аэропортов: летают по маршрутам
+      airplane: airportTiles.length >= 2 ? airportTiles.length - 1 : 0,
+    };
+
+    for (const type of ['bus', 'tram', 'train', 'airplane'] as Vehicle['type'][]) {
+      const current = this.vehicles.filter(v => v.type === type && v.health > 0).length;
+      const limit = desired[type as keyof typeof desired] ?? 0;
+      if (current < limit) this.spawnTransitVehicle(type);
+    }
+  }
+
+  spawnTransitVehicle(type: Vehicle['type']) {
+    if (type === 'airplane') {
+      const airports = this.findAllAirportPositions();
+      if (airports.length < 2) return; // Для самолёта нужно минимум 2 аэропорта
+      const src = airports[Math.floor(Math.random() * airports.length)];
+      const others = airports.filter(a => a !== src);
+      const dest = others[Math.floor(Math.random() * others.length)];
+      this.vehicles.push({
+        id: uid(), x: src.x, y: src.y, vx: 0, vy: 0,
+        angle: Math.atan2(dest.y - src.y, dest.x - src.x),
+        speed: 0, health: 200, type: 'airplane',
+        gang: 'none', driver: 'transit', passengers: 120,
+        targetX: dest.x, targetY: dest.y, altitude: 0, phase: 'taxiing',
+      });
+      this.addMessage('✈️ Рейс запущен!', '#60d0ff', src.x, src.y);
+    } else {
+      const pos = this.getRandomRoadPosition();
+      this.vehicles.push({
+        id: uid(), x: pos.x, y: pos.y, vx: 0, vy: 0, angle: pos.angle ?? 0,
+        speed: 0, health: type === 'train' ? 180 : 130,
+        type, gang: 'none', driver: 'transit',
+        passengers: type === 'bus' ? 20 : type === 'tram' ? 35 : 80,
+      });
+      this.addMessage(`🚌 Транспорт запущен: ${type}`, '#00f0ff', pos.x, pos.y);
+    }
+  }
+
+  countBuildings(type: TileType): number { let n = 0; for (let y = 0; y < MAP_HEIGHT; y++) for (let x = 0; x < MAP_WIDTH; x++) if (this.tiles[y][x].type === type) n++; return n; }
+
+  maybeGangWar() {
+    if (this.tickCount - this.gangWarTimer < 1000) return;
+    this.gangWarTimer = this.tickCount;
+    if (Math.random() < 0.3) {
+      const gangs: GangId[] = ['loons', 'yutes', 'russians'];
+      const g1 = gangs[Math.floor(Math.random() * 3)];
+      const g2 = gangs.filter(g => g !== g1)[Math.floor(Math.random() * 2)];
+      this.addMessage(`⚔️ Война банд: ${GANG_NAMES[g1]} vs ${GANG_NAMES[g2]}!`, '#ff2d8a');
+      for (let i = 0; i < 3; i++) { this.spawnGangMember(g1); this.spawnGangMember(g2); }
+    }
+  }
+
+  maybeSpawnBoss() {
+    if (this.totalKills < 30) return;
+    for (const g of ['loons', 'yutes', 'russians'] as GangId[]) {
+      if (this.bossSpawned[g]) continue;
+      if (Math.random() < 0.001) {
+        const type: Pedestrian['type'] = g === 'loons' ? 'gang1' : g === 'yutes' ? 'gang2' : 'gang3';
+        const boss = this.spawnPedestrian(type);
+        boss.health = 200;
+        this.bossSpawned[g] = true;
+        this.bossIds.push(boss.id);
+        this.addMessage(`👑 БОСС банды ${GANG_NAMES[g]} появился!`, GANG_COLORS[g]);
+      }
+    }
+  }
+
+  playerDeath() {
+    this.gameOver = true;
+    this.addMessage('💀 ВЫ ПОГИБЛИ! [R] - рестарт', '#ff4444');
+    this.explosions.push({ id: uid(), x: this.player.x, y: this.player.y, radius: 0, maxRadius: 30, life: 30, maxLife: 30 });
+  }
+
+  respawnHero() {
+    this.player.x = 80 * TILE_SIZE + TILE_SIZE / 2;
+    this.player.y = 60 * TILE_SIZE + TILE_SIZE / 2;
+    this.player.vx = 0;
+    this.player.vy = 0;
+    this.player.health = this.player.maxHealth;
+    this.player.wanted = 0;
+    if (this.playerInVehicleId !== null) {
+      const v = this.vehicles.find(x => x.id === this.playerInVehicleId);
+      if (v) v.driver = 'civilian';
+      this.playerInVehicleId = null;
+      this.player.inVehicle = false;
+    }
+    this.camera.x = this.player.x - this.viewportWidth / (2 * this.camera.zoom);
+    this.camera.y = this.player.y - this.viewportHeight / (2 * this.camera.zoom);
+    this.addMessage('🔄 Герой мгновенно респаунился в центре!', '#39ff14');
+    this.emitParticles(this.player.x, this.player.y, '#39ff14', 20, 3);
+  }
+
+  restart() {
+    this.tiles = []; this.vehicles = []; this.pedestrians = []; this.bullets = []; this.explosions = []; this.pickups = []; this.particles = []; this.messages = [];
+    this.stats = { money: 5000, population: 0, day: 1, hour: 8, minute: 0, approval: 50, crime: 20, income: 0, expenses: 0 };
+    this.player = { x: 80 * TILE_SIZE + TILE_SIZE / 2, y: 60 * TILE_SIZE + TILE_SIZE / 2, vx: 0, vy: 0, angle: 0, speed: 0, health: 100, maxHealth: 100, inVehicle: false, wanted: 0, ammo: 50, maxAmmo: 99, kills: 0, money: 0 };
+    this.playerInVehicleId = null; this.gameOver = false; this.tickCount = 0; this.totalKills = 0;
+    this.bossSpawned = { loons: false, yutes: false, russians: false, none: false }; this.bossIds = [];
+    this.deposit = 0; this.loanAmount = 0;
+    this.bankInterestRate = 0.5; this.loanInterestRate = 1.5;
+    this.taxRateResidential = 100; this.taxRateCommercial = 100; this.taxRateIndustrial = 100;
+    this.initMap(); this.initMissions(); this.spawnStartingEntities();
+  }
 }
