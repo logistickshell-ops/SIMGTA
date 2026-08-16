@@ -61,4 +61,31 @@ describe('Urban Flux city systems', () => {
     for (let tick = 0; tick < 90; tick++) game.update(16, input);
     expect(game.pedestrians.filter(ped => ped.type === 'civilian').some(ped => ped.targetX !== undefined && ped.targetY !== undefined)).toBe(true);
   });
+
+  it('keeps the city-action loop responsive while routes are planned incrementally', () => {
+    const game = new Game();
+    game.setMode('action');
+    const input = { mouseX: 420, mouseY: 320, mouseDown: false, rightDown: false, keys: {} };
+    for (let tick = 0; tick < 120; tick++) game.update(16, input);
+    expect(game.mode).toBe('action');
+    expect(game.tickCount).toBe(120);
+  });
+
+  it('keeps the world tile under the cursor fixed while zooming around that cursor', () => {
+    const game = new Game();
+    game.viewportWidth = 1280;
+    game.viewportHeight = 720;
+    game.camera.x = 320;
+    game.camera.y = 180;
+    const cursor = { x: 640, y: 360 };
+    const before = game.screenToWorld(cursor.x, cursor.y);
+    game.zoomCamera(0.5, cursor.x, cursor.y);
+    const atHalf = game.screenToWorld(cursor.x, cursor.y);
+    game.zoomCamera(6, cursor.x, cursor.y);
+    const atThree = game.screenToWorld(cursor.x, cursor.y);
+    expect(atHalf.x).toBeCloseTo(before.x, 8);
+    expect(atHalf.y).toBeCloseTo(before.y, 8);
+    expect(atThree.x).toBeCloseTo(before.x, 8);
+    expect(atThree.y).toBeCloseTo(before.y, 8);
+  });
 });

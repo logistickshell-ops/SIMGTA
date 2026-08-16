@@ -71,6 +71,7 @@ export class Game {
   private lastCityTick = 0;
   private roadGraph = new Map<string, { x: number; y: number; neighbors: { x: number; y: number; cost: number }[] }>();
   private roadGraphDirty = true;
+  private routePlanBudget = 0;
   private lastSaveTick = 0;
   private readonly saveKey = 'urban-flux-city-v2';
 
@@ -276,6 +277,7 @@ export class Game {
     this.tickCount++;
     this.mouseX = input.mouseX; this.mouseY = input.mouseY;
     this.updateTime(dt);
+    this.routePlanBudget = this.mode === 'action' ? 2 : 4;
     this.ensureRoadGraph();
     this.updateCamera(input);
     if (this.mode === 'action') this.updateAction(input, dt); else this.updateStrategy(input);
@@ -336,8 +338,9 @@ export class Game {
   }
 
   private updateStrategy(input: Input) {
-    let tx = Math.floor((input.mouseX + this.camera.x) / TILE_SIZE);
-    let ty = Math.floor((input.mouseY + this.camera.y) / TILE_SIZE);
+    const pointer = this.screenToWorld(input.mouseX, input.mouseY);
+    let tx = Math.floor(pointer.x / TILE_SIZE);
+    let ty = Math.floor(pointer.y / TILE_SIZE);
     const def = this.tool in BUILDINGS ? BUILDINGS[this.tool as TileType] : undefined;
     if (def?.size === 2) { tx -= tx % 2; ty -= ty % 2; }
     this.hoveredTile = { x: tx, y: ty };
@@ -347,8 +350,12 @@ export class Game {
   }
 
   private updateAction(input: Input, _dt: number) {
-    let dx = Number(input.keys.KeyD || input.keys.ArrowRight) - Number(input.keys.KeyA || input.keys.ArrowLeft);
-    let dy = Number(input.keys.KeyS || input.keys.ArrowDown) - Number(input.keys.KeyW || input.keys.ArrowUp);
+    const right = input.keys.KeyD === true || input.keys.ArrowRight === true;
+    const left = input.keys.KeyA === true || input.keys.ArrowLeft === true;
+    const down = input.keys.KeyS === true || input.keys.ArrowDown === true;
+    const up = input.keys.KeyW === true || input.keys.ArrowUp === true;
+    let dx = Number(right) - Number(left);
+    let dy = Number(down) - Number(up);
     if (!dx && !dy && this.autopilot && this.autopilotTarget) {
       const waypoint = this.autopilotPath[0];
       if (!waypoint) { this.addMessage(`Автопилот прибыл: ${this.autopilotTarget.label}`, '#69d9c8'); this.autopilot = false; this.autopilotTarget = null; }
@@ -374,7 +381,8 @@ export class Game {
       if (!this.isBlocked(this.player.x, ny)) this.player.y = ny;
       this.player.speed = Math.hypot(dx, dy) * speed;
     }
-    this.player.angle = Math.atan2(input.mouseY + this.camera.y - this.player.y, input.mouseX + this.camera.x - this.player.x);
+    const aim = this.screenToWorld(input.mouseX, input.mouseY);
+    this.player.angle = Math.atan2(aim.y - this.player.y, aim.x - this.player.x);
     if (input.mouseDown && this.shootingCooldown === 0) this.shoot();
     if (input.keys.KeyF) { this.toggleVehicle(); input.keys.KeyF = false; }
     this.player.x = Math.max(TILE_SIZE, Math.min(MAP_WIDTH * TILE_SIZE - TILE_SIZE, this.player.x));
@@ -490,7 +498,11 @@ export class Game {
   private movePedestrian(ped: Pedestrian, factor: number) {
     let dx = Math.cos(ped.angle), dy = Math.sin(ped.angle);
     if (ped.targetX !== undefined && ped.targetY !== undefined) {
-      if (!ped.path?.length) ped.path = this.findRoadPath(ped.x, ped.y, ped.targetX, ped.targetY);
+      if (!ped.path?.length && this.tickCount >= (ped.pathRetryTick ?? 0) && this.routePlanBudget > 0) {
+        this.routePlanBudget--;
+        ped.path = this.findRoadPath(ped.x, ped.y, ped.targetX, ped.targetY);
+        ped.pathRetryTick = this.tickCount + 12;
+      }
       const waypoint = ped.path?.[0];
       const tx = (waypoint?.x ?? ped.targetX) - ped.x, ty = (waypoint?.y ?? ped.targetY) - ped.y, distance = Math.hypot(tx, ty);
       if (distance > 8) { dx = tx / distance; dy = ty / distance; ped.angle = Math.atan2(dy, dx); if (waypoint && distance < 12) ped.path?.shift(); }
@@ -591,7 +603,11 @@ export class Game {
     for (const vehicle of this.vehicles) {
       if (vehicle.id === this.playerInVehicleId || vehicle.type === 'airplane') continue;
       if (!this.isRoadPosition(vehicle.x, vehicle.y)) { const road = this.findNearestRoadPosition(vehicle.x, vehicle.y); vehicle.x = road.x; vehicle.y = road.y; vehicle.angle = road.angle; }
-      if (!vehicle.route?.length) vehicle.route = this.nextRoadDestination(vehicle.x, vehicle.y);
+      if (!vehicle.route?.length && this.tickCount >= (vehicle.routeRetryTick ?? 0) && this.routePlanBudget > 0) {
+        this.routePlanBudget--;
+        vehicle.route = this.nextRoadDestination(vehicle.x, vehicle.y);
+        vehicle.routeRetryTick = this.tickCount + 18;
+      }
       const waypoint = vehicle.route?.[0];
       let atJunction = false;
       if (waypoint) {
@@ -810,9 +826,13 @@ export class Game {
 
   isRoadTile(x: number, y: number) { return x >= 0 && y >= 0 && x < MAP_WIDTH && y < MAP_HEIGHT && this.tiles[y][x].type === 'road'; }
   isRoadPosition(x: number, y: number) { return this.isRoadTile(Math.floor(x / TILE_SIZE), Math.floor(y / TILE_SIZE)); }
-  private isBlocked(x: number, y: number, margin = 4) {
-    const tx = Math.floor(x / TILE_SIZE), ty = Math.floor(y / TILE_SIZE); if (tx < 0 || ty < 0 || tx >= MAP_WIDTH || ty >= MAP_HEIGHT) return true;
-    const type = this.tiles[ty][tx].type; return type !== 'grass' && type !== 'road' && type !== 'park';
+  private isBlocked(x: number, y: number, _margin = 4) {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return true;
+    const tx = Math.floor(x / TILE_SIZE), ty = Math.floor(y / TILE_SIZE);
+    if (tx < 0 || ty < 0 || tx >= MAP_WIDTH || ty >= MAP_HEIGHT) return true;
+    const tile = this.tiles[ty]?.[tx];
+    if (!tile) return true;
+    return tile.type !== 'grass' && tile.type !== 'road' && tile.type !== 'park';
   }
 
   private updateCamera(input: Input) {
@@ -822,7 +842,17 @@ export class Game {
     this.camera.y = Math.max(0, Math.min(MAP_HEIGHT * TILE_SIZE - this.viewportHeight / this.camera.zoom, this.camera.y));
   }
   private centerCameraOnPlayer() { this.camera.x = this.player.x - this.viewportWidth / (2 * this.camera.zoom); this.camera.y = this.player.y - this.viewportHeight / (2 * this.camera.zoom); }
-  zoomCamera(factor: number, originX = this.viewportWidth / 2, originY = this.viewportHeight / 2) { const old = this.camera.zoom, next = Math.max(0.5, Math.min(3, old * factor)); const worldX = this.camera.x + originX / old, worldY = this.camera.y + originY / old; this.camera.zoom = next; this.camera.x = worldX - originX / next; this.camera.y = worldY - originY / next; }
+  screenToWorld(screenX: number, screenY: number) {
+    return { x: this.camera.x + screenX / this.camera.zoom, y: this.camera.y + screenY / this.camera.zoom };
+  }
+
+  zoomCamera(factor: number, originX = this.viewportWidth / 2, originY = this.viewportHeight / 2) {
+    const old = this.camera.zoom, next = Math.max(0.5, Math.min(3, old * factor));
+    const world = this.screenToWorld(originX, originY);
+    this.camera.zoom = next;
+    this.camera.x = world.x - originX / next;
+    this.camera.y = world.y - originY / next;
+  }
 
   addMessage(text: string, color = '#eaf1f4', x = this.player.x, y = this.player.y) { this.messages.push({ id: this.messageIdCounter++, text, color, life: 150, x, y }); }
   emitParticles(x: number, y: number, color: string, count: number) { for (let i = 0; i < count; i++) this.particles.push({ x, y, vx: (Math.random() - 0.5) * 2, vy: (Math.random() - 0.5) * 2, life: 28 + Math.random() * 30, maxLife: 58, color, size: 1 + Math.floor(Math.random() * 2) }); }

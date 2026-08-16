@@ -99,6 +99,7 @@ export interface Vehicle {
   altitude?: number;
   lastDecisionBlock?: { x: number; y: number };
   route?: { x: number; y: number }[];
+  routeRetryTick?: number;
 }
 
 export interface Pedestrian {
@@ -124,6 +125,7 @@ export interface Pedestrian {
   mood: number;
   decisionTick: number;
   path?: { x: number; y: number }[];
+  pathRetryTick?: number;
 }
 
 export interface Bullet {
