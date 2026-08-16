@@ -1,0 +1,20 @@
+import { Game } from '../src/game/Game';
+const input = { mouseX: -1000, mouseY: -1000, mouseDown: false, rightDown: false, keys: {} as Record<string, boolean> };
+const game = new Game();
+const startPlayer = { x: game.player.x, y: game.player.y };
+const startVehicles = new Map(game.vehicles.filter(vehicle => vehicle.type !== 'airplane').map(vehicle => [vehicle.id, { x: vehicle.x, y: vehicle.y }]));
+game.toggleAutopilot();
+for (let tick = 0; tick < 720; tick++) game.update(16.67, input);
+const playerStayed = Math.hypot(game.player.x - startPlayer.x, game.player.y - startPlayer.y) < 0.01;
+const vehicles = game.vehicles.filter(vehicle => vehicle.type !== 'airplane');
+const movedVehicles = vehicles.filter(vehicle => {
+  const start = startVehicles.get(vehicle.id);
+  return Boolean(start && Math.hypot(vehicle.x - start.x, vehicle.y - start.y) > 24 && (vehicle.route?.length ?? 0) > 0);
+}).length;
+const activeNpc = game.pedestrians.filter(pedestrian => pedestrian.state !== 'dead');
+const scheduledNpc = activeNpc.filter(pedestrian => Boolean(pedestrian.activity) && (pedestrian.path?.length ?? 0) > 0).length;
+const report = { playerStayed, vehicles: vehicles.length, movedVehicles, activeNpc: activeNpc.length, scheduledNpc };
+console.log(JSON.stringify(report, null, 2));
+if (!playerStayed) throw new Error('Мировой автопилот изменил положение главного героя.');
+if (movedVehicles < Math.max(1, Math.floor(vehicles.length * 0.75))) throw new Error('Мировой автопилот не поддерживает движение трафика.');
+if (scheduledNpc < Math.max(1, Math.floor(activeNpc.length * 0.75))) throw new Error('Мировой автопилот не поддерживает активность NPC.');

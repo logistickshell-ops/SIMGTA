@@ -724,11 +724,11 @@ export class Game {
     this.updateDayNight();
     this.updateCamera(input);
     if (this.mode === 'action') {
-      if (this.autopilotEnabled) this.updateAutopilot(input);
       this.updateAction(input, dt);
     } else {
       this.updateStrategy(input);
     }
+    if (this.autopilotEnabled && this.tickCount % 30 === 0) this.updateWorldAutopilot();
     this.rebuildSpatialIndex();
     this.updateVehicles(dt);
     this.rebuildSpatialIndex();
@@ -758,41 +758,21 @@ export class Game {
 
   toggleAutopilot() {
     this.autopilotEnabled = !this.autopilotEnabled;
-    if (!this.autopilotEnabled) {
-      this.autopilotTarget = null;
-      return;
-    }
-    this.addMessage('Автопилот включён', '#00f0ff');
+    this.autopilotTarget = this.autopilotEnabled ? { x: 0, y: 0, label: 'МИР: ТРАФИК И NPC' } : null;
+    this.addMessage(this.autopilotEnabled ? 'Автосимуляция мира включена' : 'Автосимуляция мира выключена', '#00f0ff');
   }
 
-  private updateAutopilot(_input: Input) {
-    const sourceX = this.playerInVehicleId === null ? this.player.x : (this.vehicles.find(v => v.id === this.playerInVehicleId)?.x ?? this.player.x);
-    const sourceY = this.playerInVehicleId === null ? this.player.y : (this.vehicles.find(v => v.id === this.playerInVehicleId)?.y ?? this.player.y);
-    const crime = this.findIncident('crime', sourceX, sourceY);
-    const social = this.findClosestBuilding(['commercial', 'park', 'stadium'], sourceX, sourceY);
+  private updateWorldAutopilot() {
     this.rebuildRoadGraph();
-    const patrolNodes = this.roadNodes.filter(node => {
-      const world = this.getNodeWorldPosition(node);
-      return Math.hypot(world.x - sourceX, world.y - sourceY) > TILE_SIZE * 12;
-    });
-    const fallback = patrolNodes[Math.floor(Math.random() * patrolNodes.length)] ?? this.findNearestTrafficNode(sourceX, sourceY);
-    const candidate = crime
-      ? { x: crime.x, y: crime.y, label: 'Событие' }
-      : social
-        ? { x: social.x, y: social.y, label: 'Городская точка' }
-        : fallback
-          ? { ...this.getNodeWorldPosition(fallback), label: 'Патруль' }
-          : { x: this.player.x, y: this.player.y, label: 'Ожидание' };
-    const changed = !this.autopilotTarget || Math.hypot(candidate.x - this.autopilotTarget.x, candidate.y - this.autopilotTarget.y) > TILE_SIZE * 2;
-    this.autopilotTarget = candidate;
-
-    if (this.playerInVehicleId !== null) {
-      const vehicle = this.vehicles.find(v => v.id === this.playerInVehicleId);
-      if (vehicle && (changed || !vehicle.route || vehicle.route.length === 0)) {
-        vehicle.route = this.buildTrafficRoute(vehicle.x, vehicle.y, vehicle.angle, candidate.x, candidate.y);
-        vehicle.routeIndex = 0;
-        vehicle.stalledTicks = 0;
+    for (const vehicle of this.vehicles) {
+      if (vehicle.type === 'airplane' || !vehicle.driver || vehicle.driver === 'player') continue;
+      vehicle.routeAge = (vehicle.routeAge ?? 0) + 30;
+      if (!vehicle.route || vehicle.route.length < 2 || vehicle.routeAge > 420 || (vehicle.stalledTicks ?? 0) > 18) {
+        this.assignVehicleRoute(vehicle, true);
       }
+    }
+    for (const pedestrian of this.pedestrians) {
+      if (pedestrian.state !== 'dead' && this.tickCount >= pedestrian.nextDecisionTick) this.choosePedestrianGoal(pedestrian);
     }
   }
 
@@ -976,12 +956,7 @@ export class Game {
 
     if (this.playerInVehicleId !== null) {
       const v = this.vehicles.find(v => v.id === this.playerInVehicleId);
-      if (v && this.autopilotEnabled) {
-        this.driveVehicleOnRoad(v);
-        this.player.x = v.x;
-        this.player.y = v.y;
-        this.player.angle = v.angle;
-      } else if (v) {
+      if (v) {
         if (!this.isRoadPosition(v.x, v.y, 6)) {
           const pos = this.findNearestRoadPosition(v.x, v.y);
           v.x = pos.x; v.y = pos.y; v.vx = 0; v.vy = 0;
@@ -1006,14 +981,7 @@ export class Game {
         v.speed = sp;
       }
     } else {
-      if (this.autopilotEnabled && this.autopilotTarget) {
-        dx = this.autopilotTarget.x - this.player.x;
-        dy = this.autopilotTarget.y - this.player.y;
-        const autoLength = Math.hypot(dx, dy) || 1;
-        dx /= autoLength;
-        dy /= autoLength;
-      }
-      const speed = 2.2 * (this.autopilotEnabled ? 0.8 : 1);
+      const speed = 2.2;
       const newX = this.player.x + dx * speed;
       const newY = this.player.y + dy * speed;
       // Коллизия со зданиями
@@ -1048,11 +1016,9 @@ export class Game {
       }
     }
 
-    if (!this.autopilotEnabled) {
-      const worldX = input.mouseX + this.camera.x;
-      const worldY = input.mouseY + this.camera.y;
-      this.player.angle = Math.atan2(worldY - this.player.y, worldX - this.player.x);
-    }
+    const worldX = input.mouseX + this.camera.x;
+    const worldY = input.mouseY + this.camera.y;
+    this.player.angle = Math.atan2(worldY - this.player.y, worldX - this.player.x);
 
     if (input.mouseDown && this.shootingCooldown === 0) this.shoot();
 
@@ -1244,7 +1210,38 @@ export class Game {
     v.speed = Math.sqrt(v.vx * v.vx + v.vy * v.vy);
   }
 
-  driveVehicleOnRoad(v: Vehicle) {
+  private assignVehicleRoute(v: Vehicle, avoidCurrentTarget = false) {
+    this.rebuildRoadGraph();
+    if (this.roadNodes.length < 2) return false;
+    const current = this.findNearestTrafficNode(v.x, v.y, v.angle);
+    const candidates = this.roadNodes.filter(node => {
+      if (!current) return true;
+      const distance = Math.abs(node.tx - current.tx) + Math.abs(node.ty - current.ty);
+      return distance > (avoidCurrentTarget ? 12 : 4);
+    });
+    const destination = candidates[Math.floor(Math.random() * Math.max(1, candidates.length))] ?? this.roadNodes[0];
+    const target = this.getNodeWorldPosition(destination);
+    const route = this.buildTrafficRoute(v.x, v.y, v.angle, target.x, target.y);
+    if (route.length < 2) {
+      const alternate = this.roadNodes.find(node => node.tx !== current?.tx || node.ty !== current?.ty);
+      if (!alternate) return false;
+      const alternateTarget = this.getNodeWorldPosition(alternate);
+      v.route = this.buildTrafficRoute(v.x, v.y, v.angle, alternateTarget.x, alternateTarget.y);
+    } else {
+      v.route = route;
+    }
+    v.routeIndex = 0;
+    v.routeAge = 0;
+    v.routeReplanTick = this.tickCount + 1200;
+    v.stalledTicks = 0;
+    v.yieldTicks = -30;
+    v.lastX = v.x;
+    v.lastY = v.y;
+    v.targetNodeKey = this.nodeKey(destination);
+    return (v.route?.length ?? 0) > 1;
+  }
+
+  driveVehicleOnRoad(v: Vehicle): void {
     this.rebuildRoadGraph();
     if (!this.isRoadPosition(v.x, v.y, 6)) {
       const pos = this.findNearestRoadPosition(v.x, v.y);
@@ -1255,15 +1252,17 @@ export class Game {
       v.routeIndex = 0;
     }
 
-    const needsRoute = !v.route || v.route.length === 0 || (v.routeIndex ?? 0) >= v.route.length || (v.stalledTicks ?? 0) > 80;
-    if (needsRoute) {
-      const destination = this.roadNodes[Math.floor(Math.random() * Math.max(1, this.roadNodes.length))];
-      if (!destination) return;
-      const target = this.getNodeWorldPosition(destination);
-      v.route = this.buildTrafficRoute(v.x, v.y, v.angle, target.x, target.y);
-      v.routeIndex = 0;
-      v.stalledTicks = 0;
-      v.routeReplanTick = this.tickCount + 180;
+    const distanceSinceCheck = v.lastX === undefined || v.lastY === undefined ? Infinity : Math.hypot(v.x - v.lastX, v.y - v.lastY);
+    if (distanceSinceCheck < 0.05 && (v.routeAge ?? 0) > 12) v.stalledTicks = (v.stalledTicks ?? 0) + this.simulationSpeed;
+    else v.stalledTicks = Math.max(0, (v.stalledTicks ?? 0) - this.simulationSpeed * 0.5);
+    v.lastX = v.x;
+    v.lastY = v.y;
+    const needsRoute = !v.route || v.route.length < 2 || (v.routeIndex ?? 0) >= v.route.length || (v.stalledTicks ?? 0) > 18 || this.tickCount >= (v.routeReplanTick ?? Infinity);
+    if (needsRoute && !this.assignVehicleRoute(v, (v.stalledTicks ?? 0) > 18)) {
+      v.vx = 0;
+      v.vy = 0;
+      v.speed = 0;
+      return;
     }
 
     const route = v.route ?? [];
@@ -1275,6 +1274,7 @@ export class Game {
     }
     v.routeIndex = index;
     if (index >= route.length) {
+      if (this.assignVehicleRoute(v, true)) return this.driveVehicleOnRoad(v);
       v.route = [];
       v.speed = 0;
       return;
@@ -1288,10 +1288,15 @@ export class Game {
     const desiredAngle = Math.atan2(dy, dx);
     const targetSpeed = (v.type === 'sport' ? 1.7 : v.type === 'bus' ? 1.0 : v.type === 'tram' ? 1.1 : v.type === 'train' ? 1.35 : 1.2) * this.simulationSpeed;
     const blocked = this.hasVehicleAhead(v, desiredAngle, v.type === 'train' ? 34 : 26);
-    const speed = blocked ? Math.min(0.08 * this.simulationSpeed, distance) : Math.min(targetSpeed, distance);
+    if (blocked) {
+      v.yieldTicks = (v.yieldTicks ?? 0) + this.simulationSpeed;
+      if ((v.yieldTicks ?? 0) > 14) this.assignVehicleRoute(v, true);
+    } else {
+      v.yieldTicks = Math.max(0, (v.yieldTicks ?? 0) - this.simulationSpeed);
+    }
+    const speed = blocked ? Math.min(0.32 * this.simulationSpeed, distance) : Math.min(targetSpeed, distance);
 
-    if (speed < 0.15) {
-      v.stalledTicks = (v.stalledTicks ?? 0) + this.simulationSpeed;
+    if (speed < 0.05) {
       v.vx = 0;
       v.vy = 0;
       v.speed = 0;
@@ -1308,9 +1313,13 @@ export class Game {
       v.y = nextY;
       v.speed = speed;
     } else {
+      const pos = this.findNearestRoadPosition(v.x, v.y);
+      v.x = pos.x;
+      v.y = pos.y;
+      v.angle = pos.angle;
       v.route = [];
       v.routeIndex = 0;
-      v.stalledTicks = 100;
+      v.stalledTicks = 20;
       v.vx = 0;
       v.vy = 0;
       v.speed = 0;
@@ -1333,8 +1342,20 @@ export class Game {
     return best;
   }
 
+  private findRoamingTarget(x: number, y: number) {
+    for (let attempt = 0; attempt < 18; attempt++) {
+      const tx = Math.max(1, Math.min(MAP_WIDTH - 2, Math.floor(x / TILE_SIZE) + Math.floor(Math.random() * 25) - 12));
+      const ty = Math.max(1, Math.min(MAP_HEIGHT - 2, Math.floor(y / TILE_SIZE) + Math.floor(Math.random() * 25) - 12));
+      const target = { x: tx * TILE_SIZE + TILE_SIZE / 2, y: ty * TILE_SIZE + TILE_SIZE / 2 };
+      if (!this.isBlockedByBuilding(target.x, target.y, 3) && Math.hypot(target.x - x, target.y - y) > TILE_SIZE * 3) return target;
+    }
+    return { x, y };
+  }
+
   private choosePedestrianGoal(p: Pedestrian) {
     const workingHours = this.stats.hour >= 8 && this.stats.hour < 18;
+    p.activityUntil = undefined;
+    p.targetId = undefined;
     const emergencyFire = p.profession === 'firefighter' ? this.findIncident('fire', p.x, p.y) : undefined;
     if (emergencyFire) {
       this.setPedestrianTarget(p, emergencyFire.x, emergencyFire.y, 'responding');
@@ -1371,15 +1392,28 @@ export class Game {
       }
     }
     if (workingHours && p.workX !== undefined && p.workY !== undefined && p.profession !== 'unemployed' && p.profession !== 'gang') {
+      p.activity = `Работа: ${p.profession}`;
       this.setPedestrianTarget(p, p.workX, p.workY, 'working');
-    } else if (p.socialNeed > 48 && this.stats.hour >= 16 && this.stats.hour < 23) {
+    } else if (p.socialNeed > 42 && this.stats.hour >= 16 && this.stats.hour < 23) {
       const social = this.findClosestBuilding(['park', 'commercial', 'stadium', 'casino'], p.x, p.y);
-      if (social) this.setPedestrianTarget(p, social.x, social.y, 'socializing');
-      else this.setPedestrianTarget(p, p.homeX, p.homeY, 'resting');
+      if (social) {
+        p.activity = 'Общение';
+        this.setPedestrianTarget(p, social.x, social.y, 'socializing');
+      } else {
+        const stroll = this.findRoamingTarget(p.x, p.y);
+        p.activity = 'Прогулка';
+        this.setPedestrianTarget(p, stroll.x, stroll.y, 'roaming');
+      }
+    } else if (p.profession === 'unemployed' || p.profession === 'gang' || Math.random() < 0.42) {
+      const stroll = this.findRoamingTarget(p.x, p.y);
+      p.activity = 'Прогулка';
+      this.setPedestrianTarget(p, stroll.x, stroll.y, 'roaming');
     } else {
+      p.activity = 'Отдых дома';
       this.setPedestrianTarget(p, p.homeX, p.homeY, 'resting');
     }
-    p.nextDecisionTick = this.tickCount + 60 + Math.floor(Math.random() * 80);
+    p.activityUntil = this.tickCount + (p.state === 'resting' ? 70 : 10);
+    p.nextDecisionTick = this.tickCount + 45 + Math.floor(Math.random() * 55);
   }
 
   private movePedestrianToGoal(p: Pedestrian) {
@@ -1391,6 +1425,8 @@ export class Game {
       p.vx = 0;
       p.vy = 0;
       p.speed = 0;
+      if (p.activityUntil === undefined) p.activityUntil = this.tickCount + 45;
+      if (this.tickCount >= p.activityUntil) p.nextDecisionTick = this.tickCount;
       return;
     }
     const target = path[index];
@@ -1626,7 +1662,7 @@ export class Game {
           p.y += (dy / d) * push;
         }
       }
-      if (this.playerInVehicleId !== a.id) {
+      if (!this.autopilotEnabled && this.playerInVehicleId !== a.id) {
         const dx = this.player.x - a.x;
         const dy = this.player.y - a.y;
         const d = Math.hypot(dx, dy) || 0.01;

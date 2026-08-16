@@ -53,3 +53,13 @@
 ## Границы первой итерации
 
 Реализуется стабильная направленная сетка и ориентированные маршруты, а не дорогая непрерывная физика или сложная полосная модель с сигналами. Состояния NPC и районная аналитика масштабируются на текущую карту 160×120 без внешних зависимостей.
+
+## Iteration 2: World Autopilot and Activity Scheduler
+
+The autopilot is now a world-simulation control rather than a hero controller. It must never modify player movement, steering, or target input. Its responsibilities are to maintain traffic schedules, refresh stale vehicle routes, prioritize emergency jobs, and keep pedestrian activity decisions alive.
+
+Vehicles use persistent route destinations, a bounded anti-gridlock timer, forward progress checks, and deterministic alternate-route selection. A vehicle that cannot advance for a short interval must not remain stopped for dozens of frames: it yields briefly, replans from its current road node, and continues at a crawl until the route is clear.
+
+Pedestrians use a lightweight activity scheduler. Each NPC always has either a work, emergency, social, home, patrol, or roaming target. Reaching a target schedules the next activity instead of leaving an empty path. Roaming targets are selected from walkable map points and are refreshed with a cooldown, while local separation remains limited to nearby cells.
+
+The navigation HUD exposes simulation state, traffic activity, NPC activity, and world-autopilot status separately from the action-mode controls. This prevents the user from confusing world automation with hero steering.

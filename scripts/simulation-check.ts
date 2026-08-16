@@ -6,9 +6,14 @@ const game = new Game();
 game.mode = 'strategy';
 
 for (const gang of ['loons', 'yutes', 'russians', 'vultures'] as const) game.spawnGangMember(gang);
+const startPositions = new Map(game.vehicles.filter(vehicle => vehicle.type !== 'airplane').map(vehicle => [vehicle.id, { x: vehicle.x, y: vehicle.y }]));
 for (let tick = 0; tick < 480; tick++) game.update(16.67, input);
 
 const nonAirVehicles = game.vehicles.filter(vehicle => vehicle.type !== 'airplane');
+const movedVehicles = nonAirVehicles.filter(vehicle => {
+  const start = startPositions.get(vehicle.id);
+  return start ? Math.hypot(vehicle.x - start.x, vehicle.y - start.y) > 24 : false;
+});
 const offRoadVehicles = nonAirVehicles.filter(vehicle => {
   const tx = Math.floor(vehicle.x / TILE_SIZE);
   const ty = Math.floor(vehicle.y / TILE_SIZE);
@@ -29,6 +34,8 @@ const fastForwarded = game.stats.minute > beforePause || game.stats.hour !== 8;
 const report = {
   vehicles: nonAirVehicles.length,
   vehiclesFollowingRoutes: routeVehicles.length,
+  vehiclesMoved: movedVehicles.length,
+  vehiclesStoppedAtEnd: nonAirVehicles.filter(vehicle => vehicle.speed < 0.05).length,
   offRoadVehicles: offRoadVehicles.length,
   gangPedestrianTypes: [...gangTypes].sort(),
   civilianWithProfession,
@@ -41,6 +48,7 @@ const report = {
 console.log(JSON.stringify(report, null, 2));
 if (offRoadVehicles.length > 0) throw new Error(`Найдены машины вне дороги: ${offRoadVehicles.length}`);
 if (routeVehicles.length === 0) throw new Error('Ни одна машина не получила маршрут.');
+if (movedVehicles.length < Math.max(1, Math.floor(nonAirVehicles.length * 0.75))) throw new Error(`Слишком много стоящих машин: движутся ${movedVehicles.length} из ${nonAirVehicles.length}.`);
 if (gangTypes.size !== 4) throw new Error(`Ожидались четыре типа бандитов, получено ${gangTypes.size}.`);
 if (!civilianWithProfession) throw new Error('Не назначена профессия гражданскому NPC.');
 if (!pauseStable) throw new Error('Пауза не остановила симуляцию.');

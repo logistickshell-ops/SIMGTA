@@ -7,7 +7,7 @@ export type TileType =
 
 export type GangId = 'loons' | 'yutes' | 'russians' | 'vultures' | 'none';
 export type Profession = 'worker' | 'shopkeeper' | 'industrial' | 'teacher' | 'officer' | 'medic' | 'firefighter' | 'driver' | 'unemployed' | 'gang';
-export type PedestrianState = 'walking' | 'fleeing' | 'attacking' | 'dead' | 'working' | 'socializing' | 'resting' | 'responding';
+export type PedestrianState = 'walking' | 'fleeing' | 'attacking' | 'dead' | 'working' | 'socializing' | 'resting' | 'responding' | 'roaming';
 
 export interface Tile {
   type: TileType;
@@ -91,6 +91,11 @@ export interface Vehicle {
   routeIndex?: number;
   routeReplanTick?: number;
   stalledTicks?: number;
+  targetNodeKey?: string;
+  routeAge?: number;
+  lastX?: number;
+  lastY?: number;
+  yieldTicks?: number;
 }
 
 export interface Pedestrian {
@@ -120,6 +125,9 @@ export interface Pedestrian {
   socialNeed: number;
   socialScore: number;
   mood: number;
+  activity?: string;
+  activityUntil?: number;
+  lastProgressTick?: number;
 }
 
 export interface Bullet {

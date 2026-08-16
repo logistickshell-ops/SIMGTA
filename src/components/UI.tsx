@@ -84,6 +84,10 @@ export function UI({ game, onToolChange, onModeChange, onSimulationSpeed, onTogg
   const selectedCategory = BUILD_CATEGORIES.find(category => category.id === activeCategory)!;
   const hovered = game.hoveredTile;
   const hoveredTile = hovered.y >= 0 && hovered.y < game.tiles.length && hovered.x >= 0 && hovered.x < game.tiles[0]?.length ? game.tiles[hovered.y][hovered.x] : undefined;
+  const activeVehicles = game.vehicles.filter(vehicle => vehicle.type !== 'airplane' && vehicle.health > 0);
+  const movingVehicles = activeVehicles.filter(vehicle => vehicle.speed > 0.08).length;
+  const activeNPC = game.pedestrians.filter(pedestrian => pedestrian.state !== 'dead');
+  const busyNPC = activeNPC.filter(pedestrian => pedestrian.state !== 'resting' && pedestrian.activity !== 'Отдых дома').length;
 
   return (
     <>
@@ -109,8 +113,8 @@ export function UI({ game, onToolChange, onModeChange, onSimulationSpeed, onTogg
           <div className="flex gap-1 pointer-events-auto" data-ui-element="true">
             <SpeedControl game={game} onSimulationSpeed={onSimulationSpeed} />
             <div className="panel-pixel p-1 flex items-center gap-1">
-              <button className={`btn-pixel h-8 px-2 text-[10px] ${game.autopilotEnabled ? 'active' : ''}`} onClick={onToggleAutopilot} title="Автопилот [O]" aria-label="Включить или выключить автопилот">
-                ◌ <span className="hidden sm:inline">АВТО</span>
+              <button className={`btn-pixel h-8 px-2 text-[10px] ${game.autopilotEnabled ? 'active' : ''}`} onClick={onToggleAutopilot} title="Автосимуляция мира [O]" aria-label="Включить или выключить автосимуляцию мира">
+                ◌ <span className="hidden sm:inline">МИР</span>
               </button>
               <button className={`btn-pixel h-8 px-2 text-[10px] ${game.mode === 'strategy' ? 'active' : ''}`} onClick={() => onModeChange('strategy')}>СТРОЙ</button>
               <button className={`btn-pixel h-8 px-2 text-[10px] ${game.mode === 'action' ? 'active' : ''}`} onClick={() => onModeChange('action')}>БОЙ</button>
@@ -125,11 +129,13 @@ export function UI({ game, onToolChange, onModeChange, onSimulationSpeed, onTogg
         <div className="panel-pixel px-2 py-1">КРИМ. <span className="neon-pink">{Math.floor(s.crime)}%</span></div>
         <div className="panel-pixel px-2 py-1 hidden sm:block">РАБОТА <span className="neon-cyan">{s.employment}%</span></div>
         <div className="panel-pixel px-2 py-1 hidden md:block">СОЦ. <span className="neon-yellow">{s.socialMood}%</span></div>
+        <div className="panel-pixel px-2 py-1 hidden lg:block">ТРАФИК <span className="neon-cyan">{movingVehicles}/{activeVehicles.length}</span></div>
+        <div className="panel-pixel px-2 py-1 hidden lg:block">NPC <span className="neon-green">{busyNPC}/{activeNPC.length}</span></div>
       </div>
 
       {game.autopilotEnabled && (
         <div className="absolute top-[76px] left-1/2 -translate-x-1/2 z-20 panel-pixel px-3 py-1 pointer-events-none text-[10px] pixel-font neon-cyan">
-          АВТОПИЛОТ: {game.autopilotTarget?.label ?? 'ПОИСК МАРШРУТА'}
+          МИР: ТРАФИК · NPC · СОБЫТИЯ
         </div>
       )}
 
@@ -209,7 +215,7 @@ export function UI({ game, onToolChange, onModeChange, onSimulationSpeed, onTogg
 
       <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-10 panel-pixel px-3 py-1.5 pointer-events-none hidden sm:block" data-ui-element="true">
         <div className="pixel-font text-[9px] flex gap-3 flex-wrap justify-center">
-          {game.mode === 'strategy' ? <><span><span className="neon-cyan">WASD</span> камера</span><span><span className="neon-cyan">ЛКМ</span> строить</span><span><span className="neon-cyan">P</span> пауза</span><span><span className="neon-cyan">O</span> автопилот</span></> : <><span><span className="neon-cyan">WASD</span> идти/ехать</span><span><span className="neon-cyan">F</span> машина</span><span><span className="neon-cyan">O</span> автопилот</span></>}
+          {game.mode === 'strategy' ? <><span><span className="neon-cyan">WASD</span> камера</span><span><span className="neon-cyan">ЛКМ</span> строить</span><span><span className="neon-cyan">P</span> пауза</span><span><span className="neon-cyan">O</span> автосим. мира</span></> : <><span><span className="neon-cyan">WASD</span> идти/ехать</span><span><span className="neon-cyan">F</span> машина</span><span><span className="neon-cyan">O</span> автосим. мира</span></>}
         </div>
       </div>
 
