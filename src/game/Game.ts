@@ -86,6 +86,9 @@ export class Game {
   private vehicleSpatial = new Map<string, Vehicle[]>();
   private pedestrianSpatial = new Map<string, Pedestrian[]>();
   private lastPopulationSimulationTick = 0;
+  private autopilotLastPlanningTick = -Infinity;
+  private autopilotPath: { x: number; y: number }[] = [];
+  private autopilotPathIndex = 0;
 
   // ---------- ЭКОНОМИКА ----------
   deposit = 0; // сумма на депозите в банке
@@ -569,14 +572,65 @@ export class Game {
     p.pathIndex = 0;
   }
 
-  private buildPedestrianPath(_fromX: number, fromY: number, toX: number, toY: number) {
-    // Простая ортогональная траектория с проверкой коллизии, переиспользуемая до смены цели.
-    const points: { x: number; y: number }[] = [];
-    const midX = toX;
-    if (!this.isBlockedByBuilding(midX, fromY, 3)) points.push({ x: midX, y: fromY });
-    if (!this.isBlockedByBuilding(midX, toY, 3)) points.push({ x: midX, y: toY });
-    if (points.length === 0 || Math.hypot(points[points.length - 1].x - toX, points[points.length - 1].y - toY) > 2) points.push({ x: toX, y: toY });
-    return points;
+  private findNearestWalkableTile(tx: number, ty: number) {
+    if (this.isWalkableTile(tx, ty)) return { x: tx, y: ty };
+    for (let radius = 1; radius < 8; radius++) {
+      for (let y = ty - radius; y <= ty + radius; y++) {
+        for (let x = tx - radius; x <= tx + radius; x++) {
+          if (Math.abs(x - tx) !== radius && Math.abs(y - ty) !== radius) continue;
+          if (this.isWalkableTile(x, y)) return { x, y };
+        }
+      }
+    }
+    return undefined;
+  }
+
+  private buildPedestrianPath(fromX: number, fromY: number, toX: number, toY: number) {
+    const start = this.findNearestWalkableTile(Math.floor(fromX / TILE_SIZE), Math.floor(fromY / TILE_SIZE));
+    const goal = this.findNearestWalkableTile(Math.floor(toX / TILE_SIZE), Math.floor(toY / TILE_SIZE));
+    if (!start || !goal) return [{ x: toX, y: toY }];
+
+    const startKey = `${start.x}:${start.y}`;
+    const goalKey = `${goal.x}:${goal.y}`;
+    const queue: { x: number; y: number; priority: number }[] = [{ ...start, priority: 0 }];
+    const cameFrom = new Map<string, string>();
+    const costSoFar = new Map<string, number>([[startKey, 0]]);
+    const directions = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+    let reached = startKey === goalKey;
+
+    for (let iterations = 0; queue.length > 0 && iterations < 2400 && !reached; iterations++) {
+      queue.sort((a, b) => a.priority - b.priority);
+      const current = queue.shift()!;
+      const currentKey = `${current.x}:${current.y}`;
+      for (const [dx, dy] of directions) {
+        const x = current.x + dx;
+        const y = current.y + dy;
+        if (!this.isWalkableTile(x, y)) continue;
+        const nextKey = `${x}:${y}`;
+        const nextCost = (costSoFar.get(currentKey) ?? 0) + 1;
+        if (nextCost >= (costSoFar.get(nextKey) ?? Infinity)) continue;
+        costSoFar.set(nextKey, nextCost);
+        cameFrom.set(nextKey, currentKey);
+        const heuristic = Math.abs(x - goal.x) + Math.abs(y - goal.y);
+        queue.push({ x, y, priority: nextCost + heuristic });
+        if (nextKey === goalKey) { reached = true; break; }
+      }
+    }
+
+    if (!reached) return [{ x: toX, y: toY }];
+    const tiles: { x: number; y: number }[] = [];
+    let cursor = goalKey;
+    while (cursor !== startKey) {
+      const [x, y] = cursor.split(':').map(Number);
+      tiles.push({ x, y });
+      const previous = cameFrom.get(cursor);
+      if (!previous) break;
+      cursor = previous;
+    }
+    tiles.reverse();
+    return tiles
+      .filter((tile, index) => index === 0 || tile.x !== tiles[index - 1].x || tile.y !== tiles[index - 1].y)
+      .map(tile => ({ x: tile.x * TILE_SIZE + TILE_SIZE / 2, y: tile.y * TILE_SIZE + TILE_SIZE / 2 }));
   }
 
   hasVehicleAhead(v: Vehicle, angle: number, distance = 24) {
@@ -724,11 +778,11 @@ export class Game {
     this.updateDayNight();
     this.updateCamera(input);
     if (this.mode === 'action') {
+      if (this.autopilotEnabled) this.updateAutopilot(input);
       this.updateAction(input, dt);
     } else {
       this.updateStrategy(input);
     }
-    if (this.autopilotEnabled && this.tickCount % 30 === 0) this.updateWorldAutopilot();
     this.rebuildSpatialIndex();
     this.updateVehicles(dt);
     this.rebuildSpatialIndex();
@@ -758,21 +812,46 @@ export class Game {
 
   toggleAutopilot() {
     this.autopilotEnabled = !this.autopilotEnabled;
-    this.autopilotTarget = this.autopilotEnabled ? { x: 0, y: 0, label: 'МИР: ТРАФИК И NPC' } : null;
-    this.addMessage(this.autopilotEnabled ? 'Автосимуляция мира включена' : 'Автосимуляция мира выключена', '#00f0ff');
+    if (!this.autopilotEnabled) {
+      this.autopilotTarget = null;
+      return;
+    }
+    this.addMessage('Автопилот включён', '#00f0ff');
   }
 
-  private updateWorldAutopilot() {
+  private updateAutopilot(_input: Input) {
+    const vehicle = this.playerInVehicleId === null ? undefined : this.vehicles.find(v => v.id === this.playerInVehicleId);
+    const sourceX = vehicle?.x ?? this.player.x;
+    const sourceY = vehicle?.y ?? this.player.y;
+    const targetDistance = this.autopilotTarget ? Math.hypot(this.autopilotTarget.x - sourceX, this.autopilotTarget.y - sourceY) : Infinity;
+    const shouldReplan = !this.autopilotTarget || targetDistance < TILE_SIZE * 2.5 || this.tickCount - this.autopilotLastPlanningTick >= 180;
+    if (!shouldReplan) return;
+
+    const crime = this.findIncident('crime', sourceX, sourceY);
+    const social = this.findClosestBuilding(['commercial', 'park', 'stadium'], sourceX, sourceY);
     this.rebuildRoadGraph();
-    for (const vehicle of this.vehicles) {
-      if (vehicle.type === 'airplane' || !vehicle.driver || vehicle.driver === 'player') continue;
-      vehicle.routeAge = (vehicle.routeAge ?? 0) + 30;
-      if (!vehicle.route || vehicle.route.length < 2 || vehicle.routeAge > 420 || (vehicle.stalledTicks ?? 0) > 18) {
-        this.assignVehicleRoute(vehicle, true);
-      }
-    }
-    for (const pedestrian of this.pedestrians) {
-      if (pedestrian.state !== 'dead' && this.tickCount >= pedestrian.nextDecisionTick) this.choosePedestrianGoal(pedestrian);
+    const patrolNodes = this.roadNodes.filter(node => {
+      const world = this.getNodeWorldPosition(node);
+      return Math.hypot(world.x - sourceX, world.y - sourceY) > TILE_SIZE * 12;
+    });
+    const patrolIndex = patrolNodes.length === 0 ? 0 : Math.floor(this.tickCount / 180) % patrolNodes.length;
+    const fallback = patrolNodes[patrolIndex] ?? this.findNearestTrafficNode(sourceX, sourceY);
+    const candidate = crime
+      ? { x: crime.x, y: crime.y, label: 'Событие' }
+      : social
+        ? { x: social.x, y: social.y, label: 'Городская точка' }
+        : fallback
+          ? { ...this.getNodeWorldPosition(fallback), label: 'Патруль' }
+          : { x: this.player.x, y: this.player.y, label: 'Ожидание' };
+
+    this.autopilotTarget = candidate;
+    this.autopilotLastPlanningTick = this.tickCount;
+    this.autopilotPath = vehicle ? [] : this.buildPedestrianPath(this.player.x, this.player.y, candidate.x, candidate.y);
+    this.autopilotPathIndex = 0;
+    if (vehicle) {
+      vehicle.route = this.buildTrafficRoute(vehicle.x, vehicle.y, vehicle.angle, candidate.x, candidate.y);
+      vehicle.routeIndex = 0;
+      vehicle.stalledTicks = 0;
     }
   }
 
@@ -956,7 +1035,12 @@ export class Game {
 
     if (this.playerInVehicleId !== null) {
       const v = this.vehicles.find(v => v.id === this.playerInVehicleId);
-      if (v) {
+      if (v && this.autopilotEnabled) {
+        this.driveVehicleOnRoad(v);
+        this.player.x = v.x;
+        this.player.y = v.y;
+        this.player.angle = v.angle;
+      } else if (v) {
         if (!this.isRoadPosition(v.x, v.y, 6)) {
           const pos = this.findNearestRoadPosition(v.x, v.y);
           v.x = pos.x; v.y = pos.y; v.vx = 0; v.vy = 0;
@@ -981,7 +1065,17 @@ export class Game {
         v.speed = sp;
       }
     } else {
-      const speed = 2.2;
+      if (this.autopilotEnabled && this.autopilotTarget) {
+        const path = this.autopilotPath;
+        while (this.autopilotPathIndex < path.length && Math.hypot(path[this.autopilotPathIndex].x - this.player.x, path[this.autopilotPathIndex].y - this.player.y) < 5) this.autopilotPathIndex++;
+        const nextPoint = path[this.autopilotPathIndex] ?? this.autopilotTarget;
+        dx = nextPoint.x - this.player.x;
+        dy = nextPoint.y - this.player.y;
+        const autoLength = Math.hypot(dx, dy) || 1;
+        dx /= autoLength;
+        dy /= autoLength;
+      }
+      const speed = 2.2 * (this.autopilotEnabled ? 0.8 : 1);
       const newX = this.player.x + dx * speed;
       const newY = this.player.y + dy * speed;
       // Коллизия со зданиями
@@ -1016,9 +1110,11 @@ export class Game {
       }
     }
 
-    const worldX = input.mouseX + this.camera.x;
-    const worldY = input.mouseY + this.camera.y;
-    this.player.angle = Math.atan2(worldY - this.player.y, worldX - this.player.x);
+    if (!this.autopilotEnabled) {
+      const worldX = input.mouseX + this.camera.x;
+      const worldY = input.mouseY + this.camera.y;
+      this.player.angle = Math.atan2(worldY - this.player.y, worldX - this.player.x);
+    }
 
     if (input.mouseDown && this.shootingCooldown === 0) this.shoot();
 
@@ -1210,38 +1306,7 @@ export class Game {
     v.speed = Math.sqrt(v.vx * v.vx + v.vy * v.vy);
   }
 
-  private assignVehicleRoute(v: Vehicle, avoidCurrentTarget = false) {
-    this.rebuildRoadGraph();
-    if (this.roadNodes.length < 2) return false;
-    const current = this.findNearestTrafficNode(v.x, v.y, v.angle);
-    const candidates = this.roadNodes.filter(node => {
-      if (!current) return true;
-      const distance = Math.abs(node.tx - current.tx) + Math.abs(node.ty - current.ty);
-      return distance > (avoidCurrentTarget ? 12 : 4);
-    });
-    const destination = candidates[Math.floor(Math.random() * Math.max(1, candidates.length))] ?? this.roadNodes[0];
-    const target = this.getNodeWorldPosition(destination);
-    const route = this.buildTrafficRoute(v.x, v.y, v.angle, target.x, target.y);
-    if (route.length < 2) {
-      const alternate = this.roadNodes.find(node => node.tx !== current?.tx || node.ty !== current?.ty);
-      if (!alternate) return false;
-      const alternateTarget = this.getNodeWorldPosition(alternate);
-      v.route = this.buildTrafficRoute(v.x, v.y, v.angle, alternateTarget.x, alternateTarget.y);
-    } else {
-      v.route = route;
-    }
-    v.routeIndex = 0;
-    v.routeAge = 0;
-    v.routeReplanTick = this.tickCount + 1200;
-    v.stalledTicks = 0;
-    v.yieldTicks = -30;
-    v.lastX = v.x;
-    v.lastY = v.y;
-    v.targetNodeKey = this.nodeKey(destination);
-    return (v.route?.length ?? 0) > 1;
-  }
-
-  driveVehicleOnRoad(v: Vehicle): void {
+  driveVehicleOnRoad(v: Vehicle) {
     this.rebuildRoadGraph();
     if (!this.isRoadPosition(v.x, v.y, 6)) {
       const pos = this.findNearestRoadPosition(v.x, v.y);
@@ -1252,17 +1317,15 @@ export class Game {
       v.routeIndex = 0;
     }
 
-    const distanceSinceCheck = v.lastX === undefined || v.lastY === undefined ? Infinity : Math.hypot(v.x - v.lastX, v.y - v.lastY);
-    if (distanceSinceCheck < 0.05 && (v.routeAge ?? 0) > 12) v.stalledTicks = (v.stalledTicks ?? 0) + this.simulationSpeed;
-    else v.stalledTicks = Math.max(0, (v.stalledTicks ?? 0) - this.simulationSpeed * 0.5);
-    v.lastX = v.x;
-    v.lastY = v.y;
-    const needsRoute = !v.route || v.route.length < 2 || (v.routeIndex ?? 0) >= v.route.length || (v.stalledTicks ?? 0) > 18 || this.tickCount >= (v.routeReplanTick ?? Infinity);
-    if (needsRoute && !this.assignVehicleRoute(v, (v.stalledTicks ?? 0) > 18)) {
-      v.vx = 0;
-      v.vy = 0;
-      v.speed = 0;
-      return;
+    const needsRoute = !v.route || v.route.length === 0 || (v.routeIndex ?? 0) >= v.route.length || (v.stalledTicks ?? 0) > 24 || (v.routeReplanTick !== undefined && this.tickCount >= v.routeReplanTick);
+    if (needsRoute) {
+      const destination = this.roadNodes[Math.floor(Math.random() * Math.max(1, this.roadNodes.length))];
+      if (!destination) return;
+      const target = this.getNodeWorldPosition(destination);
+      v.route = this.buildTrafficRoute(v.x, v.y, v.angle, target.x, target.y);
+      v.routeIndex = 0;
+      v.stalledTicks = 0;
+      v.routeReplanTick = this.tickCount + 180;
     }
 
     const route = v.route ?? [];
@@ -1274,7 +1337,6 @@ export class Game {
     }
     v.routeIndex = index;
     if (index >= route.length) {
-      if (this.assignVehicleRoute(v, true)) return this.driveVehicleOnRoad(v);
       v.route = [];
       v.speed = 0;
       return;
@@ -1288,15 +1350,20 @@ export class Game {
     const desiredAngle = Math.atan2(dy, dx);
     const targetSpeed = (v.type === 'sport' ? 1.7 : v.type === 'bus' ? 1.0 : v.type === 'tram' ? 1.1 : v.type === 'train' ? 1.35 : 1.2) * this.simulationSpeed;
     const blocked = this.hasVehicleAhead(v, desiredAngle, v.type === 'train' ? 34 : 26);
-    if (blocked) {
-      v.yieldTicks = (v.yieldTicks ?? 0) + this.simulationSpeed;
-      if ((v.yieldTicks ?? 0) > 14) this.assignVehicleRoute(v, true);
-    } else {
-      v.yieldTicks = Math.max(0, (v.yieldTicks ?? 0) - this.simulationSpeed);
-    }
-    const speed = blocked ? Math.min(0.32 * this.simulationSpeed, distance) : Math.min(targetSpeed, distance);
+    const stalledTicks = v.stalledTicks ?? 0;
+    const speed = blocked ? Math.min(0.12 * this.simulationSpeed, distance) : Math.min(targetSpeed, distance);
 
-    if (speed < 0.05) {
+    if (blocked && stalledTicks > 24) {
+      v.route = [];
+      v.routeIndex = 0;
+      v.stalledTicks = 25;
+      v.vx = 0;
+      v.vy = 0;
+      v.speed = 0;
+      return;
+    }
+    if (speed < 0.06) {
+      v.stalledTicks = stalledTicks + this.simulationSpeed;
       v.vx = 0;
       v.vy = 0;
       v.speed = 0;
@@ -1313,13 +1380,9 @@ export class Game {
       v.y = nextY;
       v.speed = speed;
     } else {
-      const pos = this.findNearestRoadPosition(v.x, v.y);
-      v.x = pos.x;
-      v.y = pos.y;
-      v.angle = pos.angle;
       v.route = [];
       v.routeIndex = 0;
-      v.stalledTicks = 20;
+      v.stalledTicks = 100;
       v.vx = 0;
       v.vy = 0;
       v.speed = 0;
@@ -1342,20 +1405,8 @@ export class Game {
     return best;
   }
 
-  private findRoamingTarget(x: number, y: number) {
-    for (let attempt = 0; attempt < 18; attempt++) {
-      const tx = Math.max(1, Math.min(MAP_WIDTH - 2, Math.floor(x / TILE_SIZE) + Math.floor(Math.random() * 25) - 12));
-      const ty = Math.max(1, Math.min(MAP_HEIGHT - 2, Math.floor(y / TILE_SIZE) + Math.floor(Math.random() * 25) - 12));
-      const target = { x: tx * TILE_SIZE + TILE_SIZE / 2, y: ty * TILE_SIZE + TILE_SIZE / 2 };
-      if (!this.isBlockedByBuilding(target.x, target.y, 3) && Math.hypot(target.x - x, target.y - y) > TILE_SIZE * 3) return target;
-    }
-    return { x, y };
-  }
-
   private choosePedestrianGoal(p: Pedestrian) {
     const workingHours = this.stats.hour >= 8 && this.stats.hour < 18;
-    p.activityUntil = undefined;
-    p.targetId = undefined;
     const emergencyFire = p.profession === 'firefighter' ? this.findIncident('fire', p.x, p.y) : undefined;
     if (emergencyFire) {
       this.setPedestrianTarget(p, emergencyFire.x, emergencyFire.y, 'responding');
@@ -1392,28 +1443,15 @@ export class Game {
       }
     }
     if (workingHours && p.workX !== undefined && p.workY !== undefined && p.profession !== 'unemployed' && p.profession !== 'gang') {
-      p.activity = `Работа: ${p.profession}`;
       this.setPedestrianTarget(p, p.workX, p.workY, 'working');
-    } else if (p.socialNeed > 42 && this.stats.hour >= 16 && this.stats.hour < 23) {
+    } else if (p.socialNeed > 48 && this.stats.hour >= 16 && this.stats.hour < 23) {
       const social = this.findClosestBuilding(['park', 'commercial', 'stadium', 'casino'], p.x, p.y);
-      if (social) {
-        p.activity = 'Общение';
-        this.setPedestrianTarget(p, social.x, social.y, 'socializing');
-      } else {
-        const stroll = this.findRoamingTarget(p.x, p.y);
-        p.activity = 'Прогулка';
-        this.setPedestrianTarget(p, stroll.x, stroll.y, 'roaming');
-      }
-    } else if (p.profession === 'unemployed' || p.profession === 'gang' || Math.random() < 0.42) {
-      const stroll = this.findRoamingTarget(p.x, p.y);
-      p.activity = 'Прогулка';
-      this.setPedestrianTarget(p, stroll.x, stroll.y, 'roaming');
+      if (social) this.setPedestrianTarget(p, social.x, social.y, 'socializing');
+      else this.setPedestrianTarget(p, p.homeX, p.homeY, 'resting');
     } else {
-      p.activity = 'Отдых дома';
       this.setPedestrianTarget(p, p.homeX, p.homeY, 'resting');
     }
-    p.activityUntil = this.tickCount + (p.state === 'resting' ? 70 : 10);
-    p.nextDecisionTick = this.tickCount + 45 + Math.floor(Math.random() * 55);
+    p.nextDecisionTick = this.tickCount + 60 + Math.floor(Math.random() * 80);
   }
 
   private movePedestrianToGoal(p: Pedestrian) {
@@ -1425,8 +1463,6 @@ export class Game {
       p.vx = 0;
       p.vy = 0;
       p.speed = 0;
-      if (p.activityUntil === undefined) p.activityUntil = this.tickCount + 45;
-      if (this.tickCount >= p.activityUntil) p.nextDecisionTick = this.tickCount;
       return;
     }
     const target = path[index];
@@ -1662,7 +1698,7 @@ export class Game {
           p.y += (dy / d) * push;
         }
       }
-      if (!this.autopilotEnabled && this.playerInVehicleId !== a.id) {
+      if (this.playerInVehicleId !== a.id) {
         const dx = this.player.x - a.x;
         const dy = this.player.y - a.y;
         const d = Math.hypot(dx, dy) || 0.01;

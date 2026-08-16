@@ -53,6 +53,24 @@ function SpeedControl({ game, onSimulationSpeed }: Pick<UIProps, 'game' | 'onSim
   );
 }
 
+function NavigationStatus({ game }: { game: Game }) {
+  const inVehicle = game.playerInVehicleId !== null;
+  const target = game.autopilotTarget;
+  return (
+    <div className="panel-pixel px-2 py-1.5 text-[9px] pixel-font pointer-events-auto min-w-[190px] max-w-[min(92vw,280px)]" aria-label="Навигация игрока">
+      <div className="flex items-center justify-between gap-3">
+        <span className="neon-yellow">НАВИГАЦИЯ</span>
+        <span className={game.mode === 'action' ? 'neon-pink' : 'neon-cyan'}>{game.mode === 'action' ? 'БОЙ' : 'СТРОЙ'}</span>
+      </div>
+      <div className="mt-1 flex items-center justify-between gap-2 opacity-85">
+        <span>{inVehicle ? 'МАШИНА' : 'ПЕШКОМ'}</span>
+        <span className={game.autopilotEnabled ? 'neon-green' : 'opacity-60'}>{game.autopilotEnabled ? 'АВТО ON' : 'РУЧНОЙ'}</span>
+      </div>
+      <div className="mt-1 truncate opacity-70">ЦЕЛЬ: {game.autopilotEnabled ? (target?.label ?? 'ПОИСК...') : '—'}</div>
+    </div>
+  );
+}
+
 function ToolCard({ tool, game, onToolChange }: { tool: Tool; game: Game; onToolChange: (tool: Tool) => void }) {
   const building = BUILDINGS[tool as keyof typeof BUILDINGS];
   const meta = TOOL_META[tool];
@@ -84,10 +102,6 @@ export function UI({ game, onToolChange, onModeChange, onSimulationSpeed, onTogg
   const selectedCategory = BUILD_CATEGORIES.find(category => category.id === activeCategory)!;
   const hovered = game.hoveredTile;
   const hoveredTile = hovered.y >= 0 && hovered.y < game.tiles.length && hovered.x >= 0 && hovered.x < game.tiles[0]?.length ? game.tiles[hovered.y][hovered.x] : undefined;
-  const activeVehicles = game.vehicles.filter(vehicle => vehicle.type !== 'airplane' && vehicle.health > 0);
-  const movingVehicles = activeVehicles.filter(vehicle => vehicle.speed > 0.08).length;
-  const activeNPC = game.pedestrians.filter(pedestrian => pedestrian.state !== 'dead');
-  const busyNPC = activeNPC.filter(pedestrian => pedestrian.state !== 'resting' && pedestrian.activity !== 'Отдых дома').length;
 
   return (
     <>
@@ -113,11 +127,11 @@ export function UI({ game, onToolChange, onModeChange, onSimulationSpeed, onTogg
           <div className="flex gap-1 pointer-events-auto" data-ui-element="true">
             <SpeedControl game={game} onSimulationSpeed={onSimulationSpeed} />
             <div className="panel-pixel p-1 flex items-center gap-1">
-              <button className={`btn-pixel h-8 px-2 text-[10px] ${game.autopilotEnabled ? 'active' : ''}`} onClick={onToggleAutopilot} title="Автосимуляция мира [O]" aria-label="Включить или выключить автосимуляцию мира">
-                ◌ <span className="hidden sm:inline">МИР</span>
+              <button className={`btn-pixel h-8 px-2 text-[10px] ${game.autopilotEnabled ? 'active' : ''}`} onClick={onToggleAutopilot} title="Автопилот [O]" aria-label="Включить или выключить автопилот" aria-pressed={game.autopilotEnabled}>
+                ◌ <span className="hidden sm:inline">АВТО</span>
               </button>
-              <button className={`btn-pixel h-8 px-2 text-[10px] ${game.mode === 'strategy' ? 'active' : ''}`} onClick={() => onModeChange('strategy')}>СТРОЙ</button>
-              <button className={`btn-pixel h-8 px-2 text-[10px] ${game.mode === 'action' ? 'active' : ''}`} onClick={() => onModeChange('action')}>БОЙ</button>
+              <button className={`btn-pixel h-8 px-2 text-[10px] ${game.mode === 'strategy' ? 'active' : ''}`} onClick={() => onModeChange('strategy')} aria-pressed={game.mode === 'strategy'}>СТРОЙ</button>
+              <button className={`btn-pixel h-8 px-2 text-[10px] ${game.mode === 'action' ? 'active' : ''}`} onClick={() => onModeChange('action')} aria-pressed={game.mode === 'action'}>БОЙ</button>
               {game.mode === 'strategy' && <button className="btn-pixel h-8 px-2 text-[10px]" onClick={() => setSettingsOpen(value => !value)} aria-label="Настройки экономики">⚙</button>}
             </div>
           </div>
@@ -129,18 +143,20 @@ export function UI({ game, onToolChange, onModeChange, onSimulationSpeed, onTogg
         <div className="panel-pixel px-2 py-1">КРИМ. <span className="neon-pink">{Math.floor(s.crime)}%</span></div>
         <div className="panel-pixel px-2 py-1 hidden sm:block">РАБОТА <span className="neon-cyan">{s.employment}%</span></div>
         <div className="panel-pixel px-2 py-1 hidden md:block">СОЦ. <span className="neon-yellow">{s.socialMood}%</span></div>
-        <div className="panel-pixel px-2 py-1 hidden lg:block">ТРАФИК <span className="neon-cyan">{movingVehicles}/{activeVehicles.length}</span></div>
-        <div className="panel-pixel px-2 py-1 hidden lg:block">NPC <span className="neon-green">{busyNPC}/{activeNPC.length}</span></div>
       </div>
 
       {game.autopilotEnabled && (
         <div className="absolute top-[76px] left-1/2 -translate-x-1/2 z-20 panel-pixel px-3 py-1 pointer-events-none text-[10px] pixel-font neon-cyan">
-          МИР: ТРАФИК · NPC · СОБЫТИЯ
+          АВТОПИЛОТ: {game.autopilotTarget?.label ?? 'ПОИСК МАРШРУТА'}
         </div>
       )}
 
+      <div className="absolute top-[112px] left-1/2 -translate-x-1/2 z-10 hidden sm:block">
+        <NavigationStatus game={game} />
+      </div>
+
       {game.mode === 'strategy' && (
-        <section className="absolute left-2 top-[84px] sm:left-3 sm:top-24 z-10 panel-pixel p-2 pointer-events-auto w-[272px] shadow-xl" data-ui-element="true">
+        <section className="absolute left-2 top-[84px] sm:left-3 sm:top-24 z-10 panel-pixel p-2 pointer-events-auto w-[calc(100vw-1rem)] max-w-[272px] max-h-[calc(100vh-7rem)] overflow-y-auto shadow-xl" data-ui-element="true">
           <header className="flex items-center justify-between gap-2">
             <div className="pixel-font neon-cyan text-xs">СТРОИТЕЛЬСТВО</div>
             <button className="btn-pixel h-6 px-2 text-[10px]" onClick={() => setBuildCollapsed(value => !value)} aria-label="Свернуть или развернуть панель">
@@ -156,6 +172,8 @@ export function UI({ game, onToolChange, onModeChange, onSimulationSpeed, onTogg
                     className={`btn-pixel h-10 px-0.5 text-[8px] flex flex-col items-center justify-center ${activeCategory === category.id ? 'active' : ''}`}
                     onClick={() => setActiveCategory(category.id)}
                     title={category.label}
+                    aria-label={category.label}
+                    aria-pressed={activeCategory === category.id}
                   >
                     <span className="text-sm leading-none">{category.icon}</span><span className="mt-1 leading-none">{category.short}</span>
                   </button>
@@ -215,7 +233,7 @@ export function UI({ game, onToolChange, onModeChange, onSimulationSpeed, onTogg
 
       <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-10 panel-pixel px-3 py-1.5 pointer-events-none hidden sm:block" data-ui-element="true">
         <div className="pixel-font text-[9px] flex gap-3 flex-wrap justify-center">
-          {game.mode === 'strategy' ? <><span><span className="neon-cyan">WASD</span> камера</span><span><span className="neon-cyan">ЛКМ</span> строить</span><span><span className="neon-cyan">P</span> пауза</span><span><span className="neon-cyan">O</span> автосим. мира</span></> : <><span><span className="neon-cyan">WASD</span> идти/ехать</span><span><span className="neon-cyan">F</span> машина</span><span><span className="neon-cyan">O</span> автосим. мира</span></>}
+          {game.mode === 'strategy' ? <><span><span className="neon-cyan">WASD</span> камера</span><span><span className="neon-cyan">ЛКМ</span> строить</span><span><span className="neon-cyan">P</span> пауза</span><span><span className="neon-cyan">O</span> автопилот</span></> : <><span><span className="neon-cyan">WASD</span> идти/ехать</span><span><span className="neon-cyan">F</span> машина</span><span><span className="neon-cyan">O</span> автопилот</span></>}
         </div>
       </div>
 
