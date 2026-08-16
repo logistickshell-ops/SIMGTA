@@ -1,5 +1,5 @@
 import { Game } from './Game';
-import { COLORS, TILE_SIZE, BUILDINGS, GANG_COLORS, MAP_WIDTH, MAP_HEIGHT } from './constants';
+import { COLORS, TILE_SIZE, BUILDINGS, GANG_COLORS, GANG_PRESENTATION, MAP_WIDTH, MAP_HEIGHT } from './constants';
 
 export class Renderer {
   ctx: CanvasRenderingContext2D;
@@ -181,18 +181,13 @@ export class Renderer {
       ctx.fillRect(cam.x, cam.y, this.width / cam.zoom, this.height / cam.zoom);
     }
 
-    // Подсветка дорог — мягкая, одна клетка дороги даёт небольшой тёплый круг
+    // Ночной свет дорог: один общий стиль вместо сотен градиентов на кадр.
     if (isNight) {
+      ctx.fillStyle = 'rgba(255, 220, 100, 0.08)';
       for (let y = startY; y < endY; y++) {
         for (let x = startX; x < endX; x++) {
-          if (g.tiles[y][x].type === 'road') {
-            const lx = x * TILE_SIZE + TILE_SIZE / 2;
-            const ly = y * TILE_SIZE + TILE_SIZE / 2;
-            const grd = ctx.createRadialGradient(lx, ly, 0, lx, ly, 18);
-            grd.addColorStop(0, 'rgba(255, 220, 100, 0.15)');
-            grd.addColorStop(1, 'rgba(255, 220, 100, 0)');
-            ctx.fillStyle = grd;
-            ctx.fillRect(lx - 18, ly - 18, 36, 36);
+          if (g.tiles[y][x].type === 'road' && (x + y) % 2 === 0) {
+            ctx.fillRect(x * TILE_SIZE + 7, y * TILE_SIZE + 7, 2, 2);
           }
         }
       }
@@ -552,7 +547,7 @@ export class Renderer {
     else if (v.type === 'bus') color = COLORS.bus;
     else if (v.type === 'tram') color = COLORS.tram;
     else if (v.type === 'train') color = COLORS.train;
-    else if (v.type === 'gang') color = v.gang !== 'none' ? GANG_COLORS[v.gang] : '#888888';
+    else if (v.type === 'gang') color = v.gang !== 'none' ? GANG_PRESENTATION[v.gang as keyof typeof GANG_PRESENTATION].vehicle : '#888888';
     else color = '#888899';
     // body
     ctx.fillStyle = color;
@@ -599,6 +594,7 @@ export class Renderer {
     else if (p.type === 'gang1') color = COLORS.gang1;
     else if (p.type === 'gang2') color = COLORS.gang2;
     else if (p.type === 'gang3') color = COLORS.gang3;
+    else if (p.type === 'gang4') color = COLORS.gang4;
     // body
     ctx.fillStyle = color;
     ctx.fillRect(-2, -2, 4, 4);
@@ -789,6 +785,7 @@ export class Renderer {
       else if (ped.type === 'gang1') ctx.fillStyle = COLORS.gang1;
       else if (ped.type === 'gang2') ctx.fillStyle = COLORS.gang2;
       else if (ped.type === 'gang3') ctx.fillStyle = COLORS.gang3;
+      else if (ped.type === 'gang4') ctx.fillStyle = COLORS.gang4;
       else ctx.fillStyle = '#b8b8b8';
       ctx.fillRect(rx - 1.5, ry - 1.5, 3, 3);
     }

@@ -13,7 +13,7 @@ export const COLORS = {
   park: '#3a8a3a', police: '#3060c8', hospital: '#e0e8f0', fire: '#c83030', school: '#d8b060',
   stadium: '#60a060', casino: '#ff2d8a', bank: '#d8c060', power: '#888888',
   bus: '#ffcc00', tram: '#e63946', train: '#457b9d', airport: '#204050',
-  gang1: '#ff2d8a', gang2: '#00f0ff', gang3: '#39ff14',
+  gang1: '#ff2d8a', gang2: '#00f0ff', gang3: '#39ff14', gang4: '#ff9f1c',
   player: '#ffea00', policeCar: '#3060c8', civilian: '#cccccc', blood: '#c82020', bullet: '#ffea00',
   explosion1: '#ff8c00', explosion2: '#ffea00', explosion3: '#c82020',
 };
@@ -41,8 +41,29 @@ export const BUILDINGS: Record<TileType, BuildingDef> = {
   gunshop: { type: 'gunshop', name: 'Оружейный магазин', cost: 1100, upkeep: 25, income: 180, population: 0, desc: 'Продает оружие. В режиме боя пополняет боекомплект и выдает суперпушку!', color: '#ff2d8a', size: 2, category: 'special' },
 };
 
-export const GANG_NAMES: Record<string, string> = { loons: 'Психи (розовые)', yutes: 'Южные (голубые)', russians: 'Братва (зеленые)', none: 'Нейтралы' };
-export const GANG_COLORS: Record<string, string> = { loons: COLORS.gang1, yutes: COLORS.gang2, russians: COLORS.gang3, none: '#888888' };
+export const GANG_NAMES: Record<string, string> = {
+  loons: 'Психи',
+  yutes: 'Южные',
+  russians: 'Братва',
+  vultures: 'Стервятники',
+  none: 'Нейтралы',
+};
+
+export const GANG_COLORS: Record<string, string> = {
+  loons: COLORS.gang1,
+  yutes: COLORS.gang2,
+  russians: COLORS.gang3,
+  vultures: COLORS.gang4,
+  none: '#888888',
+};
+
+export const GANG_PRESENTATION = {
+  loons: { clothing: COLORS.gang1, vehicle: '#c91868', label: 'Психи' },
+  yutes: { clothing: COLORS.gang2, vehicle: '#167ea8', label: 'Южные' },
+  russians: { clothing: COLORS.gang3, vehicle: '#237a35', label: 'Братва' },
+  vultures: { clothing: COLORS.gang4, vehicle: '#bb6515', label: 'Стервятники' },
+} as const;
+
 export const MISSION_TEMPLATES = [
   { id: 'm1', title: 'Зачистка района', description: 'Убейте 5 бандитов', target: 5, reward: 500, type: 'kill' as const },
   { id: 'm2', title: 'Налог на богатство', description: 'Соберите $1000 с налогов', target: 1000, reward: 300, type: 'collect' as const },

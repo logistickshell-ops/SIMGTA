@@ -94,7 +94,12 @@ export default function App() {
         setRerender(x => x + 1);
       }
       if (e.code === 'KeyP') {
-        game.paused = !game.paused;
+        game.setSimulationSpeed(game.simulationSpeed === 0 ? 1 : 0);
+        setRerender(x => x + 1);
+      }
+      if (e.code === 'KeyO') {
+        game.toggleAutopilot();
+        setRerender(x => x + 1);
       }
       if (e.code === 'KeyR') {
         if (game.gameOver) game.restart();
@@ -175,6 +180,14 @@ export default function App() {
       }
     }
   };
+  const handleSimulationSpeed = (speed: 0 | 1 | 2 | 5) => {
+    gameRef.current?.setSimulationSpeed(speed);
+    setRerender(x => x + 1);
+  };
+  const handleAutopilot = () => {
+    gameRef.current?.toggleAutopilot();
+    setRerender(x => x + 1);
+  };
 
   const setKey = (code: string, value: boolean) => {
     inputRef.current.keys[code] = value;
@@ -206,6 +219,8 @@ export default function App() {
             game={gameRef.current}
             onToolChange={handleToolChange}
             onModeChange={handleModeChange}
+            onSimulationSpeed={handleSimulationSpeed}
+            onToggleAutopilot={handleAutopilot}
           />
           <MobileControls
             game={gameRef.current}
@@ -220,7 +235,7 @@ export default function App() {
       {/* Title overlay - top center small */}
       <div className="absolute top-0 left-1/2 -translate-x-1/2 z-20 pointer-events-none pt-1">
         <div className="pixel-font neon-pink text-xs" style={{ textShadow: '0 0 6px #ff2d8a, 2px 2px 0 #000' }}>
-          ⚡ КРИМИНАЛЬНЫЙ ГРАД ⚡
+          URBAN FLUX — CRIMINAL CITY BUILDER
         </div>
       </div>
     </div>
