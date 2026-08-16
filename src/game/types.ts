@@ -103,6 +103,7 @@ export interface Vehicle {
   routeKind?: 'road' | 'tram' | 'rail';
   stopTimer?: number;
   stuckTicks?: number;
+  escapeTicks?: number;
 }
 
 export interface Pedestrian {

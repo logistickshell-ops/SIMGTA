@@ -118,4 +118,18 @@ describe('Urban Flux city systems', () => {
     expect(minimumMovingVehicles).toBeGreaterThan(2);
     expect(maximumBullets).toBeLessThan(12);
   });
+
+  it('keeps a safe distance between road vehicles through junctions', () => {
+    const game = new Game();
+    const input = { mouseX: 640, mouseY: 360, mouseDown: false, rightDown: false, keys: {} as Record<string, boolean> };
+    let minimumDistance = Number.POSITIVE_INFINITY;
+    for (let tick = 0; tick < 720; tick++) {
+      game.update(16, input);
+      for (let i = 0; i < game.vehicles.length; i++) for (let j = i + 1; j < game.vehicles.length; j++) {
+        if ((game.vehicles[i].routeKind ?? 'road') !== (game.vehicles[j].routeKind ?? 'road')) continue;
+        minimumDistance = Math.min(minimumDistance, Math.hypot(game.vehicles[i].x - game.vehicles[j].x, game.vehicles[i].y - game.vehicles[j].y));
+      }
+    }
+    expect(minimumDistance).toBeGreaterThanOrEqual(14);
+  });
 });

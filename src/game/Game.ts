@@ -75,6 +75,7 @@ export class Game {
   private railGraph = new Map<string, { x: number; y: number; neighbors: { x: number; y: number; cost: number }[] }>();
   private transitGraphDirty = true;
   private routePlanBudget = 0;
+  private junctionReservations = new Map<string, { vehicleId: number; expires: number }>();
   private lastSaveTick = 0;
   private readonly saveKey = 'urban-flux-city-v2';
 
@@ -670,7 +671,14 @@ export class Game {
     const candidates = vehicle.type === 'gang'
       ? this.buildings.filter(building => ['commercial', 'industrial', 'casino'].includes(building.type))
       : this.buildings.filter(building => ['residential', 'commercial', 'industrial', 'park', 'busdepot', 'tramdepot', 'trainstation'].includes(building.type));
-    const target = candidates.length ? candidates[(vehicle.id + this.tickCount) % candidates.length] : undefined;
+    const occupiedTargets = new Set(this.vehicles.filter(other => other !== vehicle && other.targetX !== undefined && other.targetY !== undefined).map(other => `${Math.round(other.targetX! / TILE_SIZE)}:${Math.round(other.targetY! / TILE_SIZE)}`));
+    let target: typeof candidates[number] | undefined;
+    for (let offset = 0; offset < candidates.length; offset++) {
+      const candidate = candidates[(vehicle.id * 7 + Math.floor(this.tickCount / 180) + offset) % candidates.length];
+      const key = `${candidate.x + candidate.size / 2}:${candidate.y + candidate.size / 2}`;
+      if (!occupiedTargets.has(key)) { target = candidate; break; }
+    }
+    if (!target) target = candidates[(vehicle.id * 7 + Math.floor(this.tickCount / 180)) % candidates.length];
     if (!target) return this.nextRoadDestination(vehicle.x, vehicle.y);
     vehicle.targetX = (target.x + target.size / 2) * TILE_SIZE;
     vehicle.targetY = (target.y + target.size / 2) * TILE_SIZE;
@@ -679,7 +687,9 @@ export class Game {
 
   private updateVehicles(dt: number) {
     const frameScale = Math.min(3, Math.max(0.5, dt / 16.67));
+    for (const [key, reservation] of this.junctionReservations) if (reservation.expires <= this.tickCount) this.junctionReservations.delete(key);
     for (const vehicle of this.vehicles) {
+      if ((vehicle.escapeTicks ?? 0) > 0) vehicle.escapeTicks = Math.max(0, (vehicle.escapeTicks ?? 0) - frameScale);
       if (vehicle.id === this.playerInVehicleId || vehicle.type === 'airplane') continue;
       if (vehicle.type === 'tram' || vehicle.type === 'train') {
         const kind = vehicle.type === 'tram' ? 'tram' : 'train';
@@ -695,7 +705,7 @@ export class Game {
       }
       if (!this.isRoadPosition(vehicle.x, vehicle.y)) { const road = this.findNearestRoadPosition(vehicle.x, vehicle.y); vehicle.x = road.x; vehicle.y = road.y; vehicle.angle = road.angle; }
       if (vehicle.stopTimer && vehicle.stopTimer > 0) { vehicle.stopTimer -= frameScale; vehicle.speed = 0; continue; }
-      if ((vehicle.stuckTicks ?? 0) > 24) { vehicle.route = []; vehicle.routeRetryTick = this.tickCount; vehicle.stuckTicks = 0; vehicle.stopTimer = 0; vehicle.angle += vehicle.id % 2 === 0 ? Math.PI / 2 : -Math.PI / 2; }
+      if ((vehicle.stuckTicks ?? 0) > 24) { vehicle.route = []; vehicle.routeRetryTick = this.tickCount; vehicle.stuckTicks = 0; vehicle.stopTimer = 0; vehicle.escapeTicks = 18; vehicle.angle += vehicle.id % 2 === 0 ? Math.PI / 2 : -Math.PI / 2; }
       if (!vehicle.route?.length && this.tickCount >= (vehicle.routeRetryTick ?? 0) && this.routePlanBudget > 0) {
         this.routePlanBudget--;
         vehicle.route = this.nextVehicleDestination(vehicle);
@@ -707,11 +717,13 @@ export class Game {
         const distance = Math.hypot(waypoint.x - vehicle.x, waypoint.y - vehicle.y);
         if (distance < 10) {
           vehicle.route?.shift();
-          if (!vehicle.route?.length) { vehicle.stopTimer = vehicle.type === 'taxi' || vehicle.type === 'bus' ? 4 : 2; vehicle.routeRetryTick = this.tickCount + 3; }
+          if (!vehicle.route?.length) { vehicle.targetX = undefined; vehicle.targetY = undefined; vehicle.stopTimer = vehicle.type === 'taxi' || vehicle.type === 'bus' ? 4 : 2; vehicle.routeRetryTick = this.tickCount + 3; }
         } else {
           const desired = Math.atan2(waypoint.y - vehicle.y, waypoint.x - vehicle.x);
-          const laneSide = vehicle.id % 2 === 0 ? 2.4 : -2.4;
-          const targetX = waypoint.x + Math.sin(desired) * laneSide, targetY = waypoint.y - Math.cos(desired) * laneSide;
+          // Правостороннее движение: в экранных координатах правая сторона — нормаль (-sin, cos).
+          // Встречные машины получают противоположную нормаль из-за обратного направления сегмента.
+          const laneOffset = 3.5;
+          const targetX = waypoint.x - Math.sin(desired) * laneOffset, targetY = waypoint.y + Math.cos(desired) * laneOffset;
           const steer = Math.atan2(targetY - vehicle.y, targetX - vehicle.x);
           const delta = Math.atan2(Math.sin(steer - vehicle.angle), Math.cos(steer - vehicle.angle));
           vehicle.angle += delta * 0.18;
@@ -719,15 +731,37 @@ export class Game {
           atJunction = !!tile && (this.roadGraph.get(this.roadKey(tile.x, tile.y))?.neighbors.length ?? 0) >= 3;
         }
       }
-      const rawBlocked = this.hasVehicleAhead(vehicle);
-      const blocked = rawBlocked && (vehicle.stuckTicks ?? 0) < 12;
+      const headOn = this.findHeadOnVehicle(vehicle);
+      if (headOn && vehicle.id > headOn.id && (vehicle.stuckTicks ?? 0) > 4) {
+        const backX = vehicle.x - Math.cos(vehicle.angle) * 8, backY = vehicle.y - Math.sin(vehicle.angle) * 8;
+        if (this.isRoadPosition(backX, backY)) { vehicle.x = backX; vehicle.y = backY; }
+        vehicle.route = []; vehicle.targetX = undefined; vehicle.targetY = undefined; vehicle.routeRetryTick = this.tickCount + 18; vehicle.stuckTicks = 0; vehicle.escapeTicks = 8;
+      }
+      let junctionBlocked = false;
+      const upcomingTile = waypoint ? this.nearestRoadTile(waypoint.x, waypoint.y) : null;
+      if (upcomingTile && (this.roadGraph.get(this.roadKey(upcomingTile.x, upcomingTile.y))?.neighbors.length ?? 0) >= 3 && waypoint && Math.hypot(waypoint.x - vehicle.x, waypoint.y - vehicle.y) < 42) {
+        const junctionKey = this.roadKey(upcomingTile.x, upcomingTile.y);
+        const reservation = this.junctionReservations.get(junctionKey);
+        if (reservation && reservation.vehicleId !== vehicle.id) junctionBlocked = true;
+        else this.junctionReservations.set(junctionKey, { vehicleId: vehicle.id, expires: this.tickCount + 24 });
+      }
+      const rawBlocked = this.hasVehicleAhead(vehicle) || junctionBlocked;
+      const blocked = rawBlocked && (vehicle.escapeTicks ?? 0) <= 0;
       vehicle.stuckTicks = rawBlocked ? (vehicle.stuckTicks ?? 0) + frameScale : Math.max(0, (vehicle.stuckTicks ?? 0) - frameScale);
       const cruise = vehicle.type === 'sport' ? 1.5 : vehicle.type === 'gang' ? 1.3 : vehicle.type === 'taxi' ? 1.1 : 1.05;
       const speed = blocked ? 0 : atJunction ? cruise * 0.48 : cruise;
       vehicle.vx = Math.cos(vehicle.angle) * speed; vehicle.vy = Math.sin(vehicle.angle) * speed;
       const nx = vehicle.x + vehicle.vx * frameScale, ny = vehicle.y + vehicle.vy * frameScale;
-      if (speed > 0 && this.isRoadPosition(nx, ny)) { vehicle.x = nx; vehicle.y = ny; }
-      vehicle.speed = speed;
+      const collisionOnStep = speed > 0 && this.hasVehicleAtPosition(vehicle, nx, ny);
+      if (speed > 0 && !collisionOnStep && this.isRoadPosition(nx, ny)) { vehicle.x = nx; vehicle.y = ny; }
+      vehicle.speed = collisionOnStep ? 0 : speed;
+      const overlap = this.vehicles.find(other => other.id < vehicle.id && other.id !== this.playerInVehicleId && (other.routeKind ?? 'road') === (vehicle.routeKind ?? 'road') && Math.hypot(other.x - vehicle.x, other.y - vehicle.y) < 14);
+      if (overlap) {
+        const candidates = [{ x: vehicle.x + 18, y: vehicle.y }, { x: vehicle.x - 18, y: vehicle.y }, { x: vehicle.x, y: vehicle.y + 18 }, { x: vehicle.x, y: vehicle.y - 18 }, { x: vehicle.x + 12, y: vehicle.y + 12 }, { x: vehicle.x - 12, y: vehicle.y - 12 }];
+        const safe = candidates.find(candidate => this.isRoadPosition(candidate.x, candidate.y) && this.vehicles.filter(other => other !== vehicle && (other.routeKind ?? 'road') === (vehicle.routeKind ?? 'road')).every(other => Math.hypot(other.x - candidate.x, other.y - candidate.y) >= 14));
+        if (safe) { vehicle.x = safe.x; vehicle.y = safe.y; }
+        vehicle.route = []; vehicle.targetX = undefined; vehicle.targetY = undefined; vehicle.routeRetryTick = this.tickCount + 2; vehicle.stopTimer = 0; vehicle.escapeTicks = 8; vehicle.speed = 0;
+      }
     }
   }
 
@@ -740,7 +774,33 @@ export class Game {
   }
 
   private turnAngle(angle: number) { return angle + (Math.random() < 0.5 ? Math.PI / 2 : -Math.PI / 2); }
-  private hasVehicleAhead(vehicle: Vehicle) { return this.vehicles.some(other => { if (other === vehicle || other.id === this.playerInVehicleId) return false; const sameNetwork = (other.routeKind ?? 'road') === (vehicle.routeKind ?? 'road'); if (!sameNetwork) return false; const dx = other.x - vehicle.x, dy = other.y - vehicle.y; const forward = dx * Math.cos(vehicle.angle) + dy * Math.sin(vehicle.angle); const lateral = Math.abs(-dx * Math.sin(vehicle.angle) + dy * Math.cos(vehicle.angle)); return forward > 0 && forward < 18 && lateral < 6; }); }
+  private hasVehicleAtPosition(vehicle: Vehicle, x: number, y: number) {
+    return this.vehicles.some(other => {
+      if (other === vehicle || other.id === this.playerInVehicleId || (other.routeKind ?? 'road') !== (vehicle.routeKind ?? 'road')) return false;
+      return Math.hypot(other.x - x, other.y - y) < 18;
+    });
+  }
+
+  private findHeadOnVehicle(vehicle: Vehicle) {
+    return this.vehicles.find(other => {
+      if (other === vehicle || other.id === this.playerInVehicleId || (other.routeKind ?? 'road') !== (vehicle.routeKind ?? 'road')) return false;
+      const dx = other.x - vehicle.x, dy = other.y - vehicle.y;
+      const distance = Math.hypot(dx, dy);
+      const relativeHeading = Math.abs(Math.atan2(Math.sin(vehicle.angle - other.angle), Math.cos(vehicle.angle - other.angle)));
+      return distance < 22 && relativeHeading > 0.95;
+    });
+  }
+
+  private hasVehicleAhead(vehicle: Vehicle) { return this.vehicles.some(other => {
+    if (other === vehicle || other.id === this.playerInVehicleId) return false;
+    const sameNetwork = (other.routeKind ?? 'road') === (vehicle.routeKind ?? 'road'); if (!sameNetwork) return false;
+    const dx = other.x - vehicle.x, dy = other.y - vehicle.y, distance = Math.hypot(dx, dy);
+    const relativeHeading = Math.abs(Math.atan2(Math.sin(vehicle.angle - other.angle), Math.cos(vehicle.angle - other.angle)));
+    const forward = dx * Math.cos(vehicle.angle) + dy * Math.sin(vehicle.angle);
+    if (distance < 22) return relativeHeading > 0.95 || forward > 0;
+    const lateral = Math.abs(-dx * Math.sin(vehicle.angle) + dy * Math.cos(vehicle.angle));
+    return forward > 0 && forward < 30 && lateral < 7;
+  }); }
 
   private updateBullets() {
     for (const bullet of this.bullets) { bullet.x += bullet.vx; bullet.y += bullet.vy; bullet.life--; }
@@ -935,8 +995,16 @@ export class Game {
   }
 
   private findNearestRoadPosition(worldX: number, worldY: number) {
-    const sx = Math.floor(worldX / TILE_SIZE), sy = Math.floor(worldY / TILE_SIZE);
-    for (let radius = 0; radius < 50; radius++) for (let y = sy - radius; y <= sy + radius; y++) for (let x = sx - radius; x <= sx + radius; x++) if (this.isRoadTile(x, y)) return { x: x * TILE_SIZE + 8, y: y * TILE_SIZE + 8, angle: 0 };
+    const sx = Math.floor(worldX / TILE_SIZE), sy = Math.floor(worldY / TILE_SIZE); let best: { x: number; y: number; distance: number } | null = null;
+    for (let radius = 0; radius < 50; radius++) {
+      for (let y = sy - radius; y <= sy + radius; y++) for (let x = sx - radius; x <= sx + radius; x++) {
+        if (!this.isRoadTile(x, y)) continue;
+        const distance = Math.hypot(x - sx, y - sy);
+        if (!best || distance < best.distance) best = { x, y, distance };
+      }
+      const selected = best as { x: number; y: number; distance: number } | null;
+      if (selected !== null) return { x: selected.x * TILE_SIZE + 8, y: selected.y * TILE_SIZE + 8, angle: 0 };
+    }
     return this.getRandomRoadPosition();
   }
 
