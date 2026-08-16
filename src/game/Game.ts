@@ -476,16 +476,22 @@ export class Game {
   }
 
   private decideGangNpc(ped: Pedestrian) {
+    if ((ped.combatCooldown ?? 0) > 0) ped.combatCooldown = Math.max(0, (ped.combatCooldown ?? 0) - 60);
     const playerDistance = Math.hypot(this.player.x - ped.x, this.player.y - ped.y);
     if ((this.player.wanted > 0 || this.playerInVehicleId !== null) && playerDistance < 260) {
-      ped.targetX = this.player.x; ped.targetY = this.player.y; ped.state = 'attacking';
-      if (playerDistance < 180 && ped.weaponCooldown <= 0) this.fireNpcBullet(ped, this.player.x, this.player.y, 14);
+      ped.targetX = this.player.x; ped.targetY = this.player.y; ped.path = undefined; ped.state = 'attacking';
+      if (playerDistance < 180 && ped.weaponCooldown <= 0 && (ped.combatCooldown ?? 0) <= 0) { this.fireNpcBullet(ped, this.player.x, this.player.y, 14); ped.combatCooldown = 180; }
       return;
     }
-    const rival = this.nearbyPeds(ped.x, ped.y).find(other => other.type === 'enforcer' && other.gang !== ped.gang && Math.hypot(other.x - ped.x, other.y - ped.y) < 170);
-    if (rival) { ped.targetX = rival.x; ped.targetY = rival.y; ped.state = 'attacking'; if (ped.weaponCooldown <= 0) this.fireNpcBullet(ped, rival.x, rival.y, 12); return; }
+    const isAggressor = ped.id % 3 === 0;
+    const rival = isAggressor ? this.nearbyPeds(ped.x, ped.y).find(other => other.type === 'enforcer' && other.gang !== ped.gang && other.gang !== 'none' && Math.hypot(other.x - ped.x, other.y - ped.y) < 120) : undefined;
+    if (rival) {
+      ped.targetX = rival.x; ped.targetY = rival.y; ped.path = undefined; ped.state = 'attacking';
+      if (ped.weaponCooldown <= 0 && (ped.combatCooldown ?? 0) <= 0) { this.fireNpcBullet(ped, rival.x, rival.y, 12); ped.combatCooldown = 180; }
+      return;
+    }
     const territory = this.findGangTile(ped.gang);
-    ped.targetX = territory.x * TILE_SIZE; ped.targetY = territory.y * TILE_SIZE; ped.state = 'walking';
+    ped.targetX = (territory.x + ((ped.id % 5) - 2) * 2) * TILE_SIZE; ped.targetY = (territory.y + ((Math.floor(ped.id / 5) % 5) - 2) * 2) * TILE_SIZE; ped.path = undefined; ped.state = 'walking';
   }
 
   private decideOfficer(ped: Pedestrian) {
@@ -516,7 +522,8 @@ export class Game {
   private movePedestrian(ped: Pedestrian, factor: number) {
     let dx = Math.cos(ped.angle), dy = Math.sin(ped.angle);
     if (ped.targetX !== undefined && ped.targetY !== undefined) {
-      if (!ped.path?.length && this.tickCount >= (ped.pathRetryTick ?? 0) && this.routePlanBudget > 0) {
+      const useRoadPath = ped.type !== 'enforcer';
+      if (useRoadPath && !ped.path?.length && this.tickCount >= (ped.pathRetryTick ?? 0) && this.routePlanBudget > 0) {
         this.routePlanBudget--;
         ped.path = this.findRoadPath(ped.x, ped.y, ped.targetX, ped.targetY);
         ped.pathRetryTick = this.tickCount + 12;
@@ -688,6 +695,7 @@ export class Game {
       }
       if (!this.isRoadPosition(vehicle.x, vehicle.y)) { const road = this.findNearestRoadPosition(vehicle.x, vehicle.y); vehicle.x = road.x; vehicle.y = road.y; vehicle.angle = road.angle; }
       if (vehicle.stopTimer && vehicle.stopTimer > 0) { vehicle.stopTimer -= frameScale; vehicle.speed = 0; continue; }
+      if ((vehicle.stuckTicks ?? 0) > 24) { vehicle.route = []; vehicle.routeRetryTick = this.tickCount; vehicle.stuckTicks = 0; vehicle.stopTimer = 0; vehicle.angle += vehicle.id % 2 === 0 ? Math.PI / 2 : -Math.PI / 2; }
       if (!vehicle.route?.length && this.tickCount >= (vehicle.routeRetryTick ?? 0) && this.routePlanBudget > 0) {
         this.routePlanBudget--;
         vehicle.route = this.nextVehicleDestination(vehicle);
@@ -699,7 +707,7 @@ export class Game {
         const distance = Math.hypot(waypoint.x - vehicle.x, waypoint.y - vehicle.y);
         if (distance < 10) {
           vehicle.route?.shift();
-          if (!vehicle.route?.length) vehicle.stopTimer = vehicle.type === 'taxi' || vehicle.type === 'bus' ? 34 : 18;
+          if (!vehicle.route?.length) { vehicle.stopTimer = vehicle.type === 'taxi' || vehicle.type === 'bus' ? 4 : 2; vehicle.routeRetryTick = this.tickCount + 3; }
         } else {
           const desired = Math.atan2(waypoint.y - vehicle.y, waypoint.x - vehicle.x);
           const laneSide = vehicle.id % 2 === 0 ? 2.4 : -2.4;
@@ -711,7 +719,9 @@ export class Game {
           atJunction = !!tile && (this.roadGraph.get(this.roadKey(tile.x, tile.y))?.neighbors.length ?? 0) >= 3;
         }
       }
-      const blocked = this.hasVehicleAhead(vehicle);
+      const rawBlocked = this.hasVehicleAhead(vehicle);
+      const blocked = rawBlocked && (vehicle.stuckTicks ?? 0) < 12;
+      vehicle.stuckTicks = rawBlocked ? (vehicle.stuckTicks ?? 0) + frameScale : Math.max(0, (vehicle.stuckTicks ?? 0) - frameScale);
       const cruise = vehicle.type === 'sport' ? 1.5 : vehicle.type === 'gang' ? 1.3 : vehicle.type === 'taxi' ? 1.1 : 1.05;
       const speed = blocked ? 0 : atJunction ? cruise * 0.48 : cruise;
       vehicle.vx = Math.cos(vehicle.angle) * speed; vehicle.vy = Math.sin(vehicle.angle) * speed;
@@ -730,7 +740,7 @@ export class Game {
   }
 
   private turnAngle(angle: number) { return angle + (Math.random() < 0.5 ? Math.PI / 2 : -Math.PI / 2); }
-  private hasVehicleAhead(vehicle: Vehicle) { return this.vehicles.some(other => { if (other === vehicle || other.id === this.playerInVehicleId) return false; const dx = other.x - vehicle.x, dy = other.y - vehicle.y; const forward = dx * Math.cos(vehicle.angle) + dy * Math.sin(vehicle.angle); const lateral = Math.abs(-dx * Math.sin(vehicle.angle) + dy * Math.cos(vehicle.angle)); return forward > 0 && forward < 24 && lateral < 7; }); }
+  private hasVehicleAhead(vehicle: Vehicle) { return this.vehicles.some(other => { if (other === vehicle || other.id === this.playerInVehicleId) return false; const sameNetwork = (other.routeKind ?? 'road') === (vehicle.routeKind ?? 'road'); if (!sameNetwork) return false; const dx = other.x - vehicle.x, dy = other.y - vehicle.y; const forward = dx * Math.cos(vehicle.angle) + dy * Math.sin(vehicle.angle); const lateral = Math.abs(-dx * Math.sin(vehicle.angle) + dy * Math.cos(vehicle.angle)); return forward > 0 && forward < 18 && lateral < 6; }); }
 
   private updateBullets() {
     for (const bullet of this.bullets) { bullet.x += bullet.vx; bullet.y += bullet.vy; bullet.life--; }
@@ -875,9 +885,18 @@ export class Game {
     }
   }
 
+  private getSeparatedRoadPosition(minDistance = 32) {
+    let candidate = this.getRandomRoadPosition();
+    for (let attempt = 0; attempt < 40; attempt++) {
+      candidate = this.getRandomRoadPosition();
+      if (this.vehicles.every(vehicle => Math.hypot(vehicle.x - candidate.x, vehicle.y - candidate.y) >= minDistance)) return candidate;
+    }
+    return candidate;
+  }
+
   spawnRandomVehicle() {
-    const types: Vehicle['type'][] = ['car', 'car', 'taxi', 'sport']; const type = types[Math.floor(Math.random() * types.length)]; const pos = this.getRandomRoadPosition();
-    this.vehicles.push({ id: uid(), x: pos.x, y: pos.y, vx: 0, vy: 0, angle: pos.angle, speed: 0, health: 100, type, gang: 'none', driver: 'civilian', passengers: 0 });
+    const types: Vehicle['type'][] = ['car', 'car', 'taxi', 'sport']; const type = types[Math.floor(Math.random() * types.length)]; const pos = this.getSeparatedRoadPosition();
+    this.vehicles.push({ id: uid(), x: pos.x, y: pos.y, vx: 0, vy: 0, angle: pos.angle, speed: 0, health: 100, type, gang: 'none', driver: 'civilian', passengers: 0, routeKind: 'road', stuckTicks: 0 });
   }
 
   private spawnTransitVehicle(type: 'tram' | 'train', x: number, y: number) {
@@ -888,8 +907,8 @@ export class Game {
   }
 
   private spawnGangVehicle(gang: Exclude<GangId, 'none'>) {
-    const pos = this.getRandomRoadPosition();
-    this.vehicles.push({ id: uid(), x: pos.x, y: pos.y, vx: 0, vy: 0, angle: pos.angle, speed: 0, health: 120, type: 'gang', gang, driver: 'gang', passengers: 2 });
+    const pos = this.getSeparatedRoadPosition(48);
+    this.vehicles.push({ id: uid(), x: pos.x, y: pos.y, vx: 0, vy: 0, angle: pos.angle, speed: 0, health: 120, type: 'gang', gang, driver: 'gang', passengers: 2, routeKind: 'road', stuckTicks: 0 });
   }
 
   spawnPedestrian(type: Pedestrian['type'], x?: number, y?: number, gang: GangId = 'none') {
@@ -903,7 +922,7 @@ export class Game {
   }
 
   private spawnGangMember(gang: Exclude<GangId, 'none'>) {
-    const territory = this.findGangTile(gang); this.spawnPedestrian('enforcer', territory.x * TILE_SIZE, territory.y * TILE_SIZE, gang);
+    const territory = this.findGangTile(gang); const spread = this.pedestrians.filter(ped => ped.gang === gang && ped.type === 'enforcer').length; const ox = (spread % 3 - 1) * 28; const oy = (Math.floor(spread / 3) % 3 - 1) * 28; this.spawnPedestrian('enforcer', territory.x * TILE_SIZE + ox, territory.y * TILE_SIZE + oy, gang);
   }
 
   private fireNpcBullet(ped: Pedestrian, targetX: number, targetY: number, damage: number) {

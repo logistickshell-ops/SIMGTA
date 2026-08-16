@@ -102,6 +102,7 @@ export interface Vehicle {
   routeRetryTick?: number;
   routeKind?: 'road' | 'tram' | 'rail';
   stopTimer?: number;
+  stuckTicks?: number;
 }
 
 export interface Pedestrian {
@@ -128,6 +129,7 @@ export interface Pedestrian {
   decisionTick: number;
   path?: { x: number; y: number }[];
   pathRetryTick?: number;
+  combatCooldown?: number;
   intent?: 'home' | 'work' | 'social' | 'respond' | 'patrol' | 'territory';
 }
 

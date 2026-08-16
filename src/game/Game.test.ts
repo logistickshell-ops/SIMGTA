@@ -104,4 +104,18 @@ describe('Urban Flux city systems', () => {
     expect(game.tiles[20][50]?.type).toBe('tramrail');
     expect(game.tiles[22][50]?.type).toBe('rail');
   });
+
+  it('keeps traffic moving and prevents city-wide gang firefights', () => {
+    const game = new Game();
+    const input = { mouseX: 640, mouseY: 360, mouseDown: false, rightDown: false, keys: {} as Record<string, boolean> };
+    let minimumMovingVehicles = Number.POSITIVE_INFINITY;
+    let maximumBullets = 0;
+    for (let tick = 0; tick < 720; tick++) {
+      game.update(16, input);
+      minimumMovingVehicles = Math.min(minimumMovingVehicles, game.vehicles.filter(vehicle => vehicle.speed > 0).length);
+      maximumBullets = Math.max(maximumBullets, game.bullets.length);
+    }
+    expect(minimumMovingVehicles).toBeGreaterThan(2);
+    expect(maximumBullets).toBeLessThan(12);
+  });
 });
