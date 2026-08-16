@@ -64,6 +64,7 @@ export class Game {
   taxRateIndustrial = 100;
   private npcStride = 3;
   private spatialGrid = new Map<string, Pedestrian[]>();
+  private lastGridTick = -1;
   private lastIncidentTick = 0;
   private lastGangTick = 0;
   private lastAssignmentTick = 0;
@@ -160,6 +161,15 @@ export class Game {
   clearSavedGame() { if (typeof localStorage !== 'undefined') localStorage.removeItem(this.saveKey); }
 
   setSpeed(speed: SimulationSpeed) { this.speed = speed; this.paused = false; }
+  setMode(mode: GameMode) {
+    if (this.mode === mode) return;
+    this.mode = mode;
+    this.mouseX = this.viewportWidth / 2; this.mouseY = this.viewportHeight / 2;
+    this.autopilot = false; this.autopilotTarget = null; this.autopilotPath = [];
+    if (mode === 'strategy') { this.playerInVehicleId = null; this.player.inVehicle = false; }
+    this.rebuildSpatialGrid();
+    this.addMessage(mode === 'action' ? 'Городской режим активен' : 'Карта управления активна', '#31d7c8');
+  }
   togglePause() { this.paused = !this.paused; }
   toggleAutopilot() {
     if (this.autopilot) { this.autopilot = false; this.autopilotTarget = null; this.autopilotPath = []; this.addMessage('Автопилот отключён', '#aeb9c4'); return; }
@@ -270,7 +280,7 @@ export class Game {
     this.updateCamera(input);
     if (this.mode === 'action') this.updateAction(input, dt); else this.updateStrategy(input);
     this.updateVehicles(dt);
-    this.rebuildSpatialGrid();
+    if (this.tickCount - this.lastGridTick >= this.npcStride) { this.lastGridTick = this.tickCount; this.rebuildSpatialGrid(); }
     this.updatePedestrians(dt);
     this.updateBullets();
     this.updateExplosions();
@@ -418,21 +428,25 @@ export class Game {
   }
 
   private decideNpc(ped: Pedestrian) {
-    ped.decisionTick = this.tickCount + 24 + Math.floor(Math.random() * 30);
+    ped.decisionTick = this.tickCount + 60 + Math.floor(Math.random() * 45);
     if (ped.type === 'enforcer') { this.decideGangNpc(ped); return; }
     if (ped.type === 'officer') { this.decideOfficer(ped); return; }
     if (ped.type === 'firefighter') { this.decideFirefighter(ped); return; }
     if (ped.type === 'medic') { this.decideMedic(ped); return; }
     const workingHours = this.stats.hour >= 8 && this.stats.hour < 18;
-    const needsSocial = ped.socialMeter < 42 || (this.stats.hour >= 18 && this.stats.hour < 23);
-    const destination = workingHours
-      ? this.getBuildingById(ped.workBuildingId) ?? this.findWorkplace(ped.profession)
-      : needsSocial ? this.getNearestBuilding(ped.x, ped.y, ['park', 'commercial', 'stadium']) : this.getBuildingById(ped.homeBuildingId);
+    const socialHours = this.stats.hour >= 18 && this.stats.hour < 22;
+    const home = this.getBuildingById(ped.homeBuildingId);
+    const work = this.getBuildingById(ped.workBuildingId) ?? this.findWorkplace(ped.profession);
+    const social = this.getNearestBuilding(ped.x, ped.y, ['park', 'commercial', 'stadium']);
+    const destination = workingHours ? work : socialHours && social ? social : home ?? social ?? work;
     if (destination) {
       ped.targetX = (destination.x + destination.size / 2) * TILE_SIZE;
       ped.targetY = (destination.y + destination.size / 2) * TILE_SIZE;
-      ped.state = needsSocial && !workingHours ? 'socializing' : workingHours ? 'working' : 'walking';
-    } else { ped.state = 'walking'; ped.angle += (Math.random() - 0.5) * 1.6; }
+      ped.state = socialHours && destination === social ? 'socializing' : workingHours && destination === work ? 'working' : 'walking';
+    } else {
+      const roam = this.getRandomRoadPosition();
+      ped.targetX = roam.x; ped.targetY = roam.y; ped.state = 'walking';
+    }
   }
 
   private decideGangNpc(ped: Pedestrian) {
@@ -572,7 +586,8 @@ export class Game {
     return this.findRoadPath(worldX, worldY, target.x, target.y);
   }
 
-  private updateVehicles(_dt: number) {
+  private updateVehicles(dt: number) {
+    const frameScale = Math.min(3, Math.max(0.5, dt / 16.67));
     for (const vehicle of this.vehicles) {
       if (vehicle.id === this.playerInVehicleId || vehicle.type === 'airplane') continue;
       if (!this.isRoadPosition(vehicle.x, vehicle.y)) { const road = this.findNearestRoadPosition(vehicle.x, vehicle.y); vehicle.x = road.x; vehicle.y = road.y; vehicle.angle = road.angle; }
@@ -597,7 +612,7 @@ export class Game {
       const cruise = vehicle.type === 'sport' ? 1.5 : vehicle.type === 'gang' ? 1.3 : 1.05;
       const speed = blocked ? 0 : atJunction ? cruise * 0.48 : cruise;
       vehicle.vx = Math.cos(vehicle.angle) * speed; vehicle.vy = Math.sin(vehicle.angle) * speed;
-      const nx = vehicle.x + vehicle.vx, ny = vehicle.y + vehicle.vy;
+      const nx = vehicle.x + vehicle.vx * frameScale, ny = vehicle.y + vehicle.vy * frameScale;
       if (speed > 0 && this.isRoadPosition(nx, ny)) { vehicle.x = nx; vehicle.y = ny; }
       vehicle.speed = speed;
     }

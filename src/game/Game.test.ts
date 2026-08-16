@@ -43,4 +43,22 @@ describe('Urban Flux city systems', () => {
     expect(game.stats.zoneDemand.residential).toBeGreaterThanOrEqual(0);
     expect(game.stats.zoneDemand.residential).toBeLessThanOrEqual(100);
   });
+
+  it('switches between strategy and action without stale autopilot state', () => {
+    const game = new Game();
+    game.autopilot = true;
+    game.setMode('action');
+    expect(game.mode).toBe('action');
+    expect(game.autopilot).toBe(false);
+    game.setMode('strategy');
+    expect(game.mode).toBe('strategy');
+    expect(game.playerInVehicleId).toBeNull();
+  });
+
+  it('gives civilians stable daily destinations instead of random frame-to-frame turns', () => {
+    const game = new Game();
+    const input = { mouseX: 0, mouseY: 0, mouseDown: false, rightDown: false, keys: {} };
+    for (let tick = 0; tick < 90; tick++) game.update(16, input);
+    expect(game.pedestrians.filter(ped => ped.type === 'civilian').some(ped => ped.targetX !== undefined && ped.targetY !== undefined)).toBe(true);
+  });
 });

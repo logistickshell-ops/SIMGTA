@@ -22,13 +22,24 @@ export default function Home() {
     const renderer = new Renderer(canvas, game);
     gameRef.current = game;
     setReady(true);
-    const resize = () => { canvas.width = window.innerWidth; canvas.height = window.innerHeight; renderer.resize(canvas.width, canvas.height); };
-    const updatePointer = (event: PointerEvent | MouseEvent) => { inputRef.current.mouseX = event.clientX; inputRef.current.mouseY = event.clientY; };
+    const resize = () => {
+      const rect = canvas.getBoundingClientRect();
+      const pixelRatio = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+      canvas.width = Math.max(1, Math.floor(rect.width * pixelRatio));
+      canvas.height = Math.max(1, Math.floor(rect.height * pixelRatio));
+      renderer.resize(canvas.width, canvas.height);
+    };
+    const updatePointer = (event: PointerEvent | MouseEvent) => {
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / Math.max(1, rect.width), scaleY = canvas.height / Math.max(1, rect.height);
+      inputRef.current.mouseX = (event.clientX - rect.left) * scaleX;
+      inputRef.current.mouseY = (event.clientY - rect.top) * scaleY;
+    };
     const onPointerDown = (event: PointerEvent) => { if (event.target !== canvas) return; event.preventDefault(); updatePointer(event); if (event.button === 0) inputRef.current.mouseDown = true; if (event.button === 2) inputRef.current.rightDown = true; };
     const onPointerUp = () => { inputRef.current.mouseDown = false; inputRef.current.rightDown = false; };
     const onKeyDown = (event: KeyboardEvent) => {
       inputRef.current.keys[event.code] = true;
-      if (event.code === 'Tab') { event.preventDefault(); game.mode = game.mode === 'strategy' ? 'action' : 'strategy'; }
+      if (event.code === 'Tab') { event.preventDefault(); game.setMode(game.mode === 'strategy' ? 'action' : 'strategy'); }
       if (event.code === 'KeyP') game.togglePause();
       if (event.code === 'KeyR') game.gameOver ? game.restart() : game.respawnHero();
       if (event.code === 'KeyG') game.toggleAutopilot();
@@ -37,10 +48,10 @@ export default function Home() {
       if (index >= 0 && index < tools.length) game.tool = tools[index];
     };
     const onKeyUp = (event: KeyboardEvent) => { inputRef.current.keys[event.code] = false; };
-    const onWheel = (event: WheelEvent) => { if (event.target !== canvas) return; event.preventDefault(); game.zoomCamera(event.deltaY < 0 ? 1.13 : 0.88, event.clientX, event.clientY); };
+    const onWheel = (event: WheelEvent) => { if (event.target !== canvas) return; event.preventDefault(); game.zoomCamera(event.deltaY < 0 ? 1.13 : 0.88, inputRef.current.mouseX, inputRef.current.mouseY); };
     const loop = (time: number) => {
-      const dt = time - previousRef.current; previousRef.current = time;
-      game.update(dt, inputRef.current);
+      const dt = Math.min(34, Math.max(0, time - previousRef.current)); previousRef.current = time;
+      game.update(dt || 16.67, inputRef.current);
       renderer.draw();
       if (Math.floor(time / 100) !== Math.floor((time - dt) / 100)) setFrame(value => (value + 1) % 1_000_000);
       rafRef.current = requestAnimationFrame(loop);
@@ -65,7 +76,7 @@ export default function Home() {
   }, []);
 
   const game = gameRef.current;
-  const setMode = (mode: GameMode) => { if (game) game.mode = mode; };
+  const setMode = (mode: GameMode) => { if (game) game.setMode(mode); };
   const setTool = (tool: Tool) => { if (game) game.tool = tool; };
 
   return (
